@@ -307,6 +307,13 @@ func (s *Store) ConfigSet(key, value string) error {
 	return err
 }
 
+// ConfigDelete removes a config entry; deleting a key that isn't set is a
+// no-op (unsetting twice must not error).
+func (s *Store) ConfigDelete(key string) error {
+	_, err := s.DB.Exec(`DELETE FROM config WHERE key = ?`, key)
+	return err
+}
+
 // ConfigAll returns all config entries.
 func (s *Store) ConfigAll() (map[string]string, error) {
 	rows, err := s.DB.Query(`SELECT key, value FROM config ORDER BY key`)

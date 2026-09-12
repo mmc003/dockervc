@@ -8,15 +8,16 @@ import (
 	"github.com/spf13/cobra"
 
 	"dockervc/internal/dockerapi"
+	"dockervc/internal/model"
 	"dockervc/internal/snapshot"
 )
 
 var snapOpts struct {
-	message     string
-	stop        bool
-	only        []string
-	anonymous   bool
-	bindMounts  bool
+	message    string
+	stop       bool
+	only       []string
+	anonymous  bool
+	bindMounts bool
 }
 
 var validScopes = map[string]bool{
@@ -24,10 +25,10 @@ var validScopes = map[string]bool{
 }
 
 var snapshotCmd = &cobra.Command{
-	Use:     "snapshot",
-	Aliases: []string{"commit"},
-	Short:   "Capture the current Docker engine state as a snapshot",
-	Args:    cobra.NoArgs,
+	Use:         "snapshot",
+	Aliases:     []string{"commit"},
+	Short:       "Capture the current Docker engine state as a snapshot",
+	Args:        cobra.NoArgs,
 	Annotations: map[string]string{needsStore: "true"},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		for _, scope := range snapOpts.only {
@@ -73,9 +74,9 @@ var snapshotCmd = &cobra.Command{
 }
 
 var logCmd = &cobra.Command{
-	Use:   "log",
-	Short: "List snapshots",
-	Args:  cobra.NoArgs,
+	Use:         "log",
+	Short:       "List snapshots",
+	Args:        cobra.NoArgs,
 	Annotations: map[string]string{needsStore: "true"},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		rows, err := st.ListSnapshots()
@@ -101,9 +102,9 @@ var logCmd = &cobra.Command{
 }
 
 var showCmd = &cobra.Command{
-	Use:   "show <snapshot>",
-	Short: "Show the contents of a snapshot",
-	Args:  cobra.ExactArgs(1),
+	Use:         "show <snapshot>",
+	Short:       "Show the contents of a snapshot",
+	Args:        cobra.ExactArgs(1),
 	Annotations: map[string]string{needsStore: "true"},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		m, err := st.GetSnapshot(args[0])
@@ -165,23 +166,56 @@ var showCmd = &cobra.Command{
 }
 
 var deleteCmd = &cobra.Command{
-	Use:   "delete <snapshot>",
-	Short: "Delete a snapshot (objects are reclaimed by prune)",
-	Args:  cobra.ExactArgs(1),
+	Use:         "delete <snapshot>…",
+	Short:       "Delete one or more snapshots (objects are reclaimed by prune)",
+	Args:        cobra.MinimumNArgs(1),
 	Annotations: map[string]string{needsStore: "true"},
 	RunE: func(cmd *cobra.Command, args []string) error {
-		m, err := st.GetSnapshot(args[0])
-		if err != nil {
-			return err
+		// Resolve every id up front (prefixes allowed, duplicates collapsed)
+		// so one bad name deletes nothing.
+		var manifests []*model.Manifest
+		seen := map[string]bool{}
+		for _, arg := range args {
+			m, err := st.GetSnapshot(arg)
+			if err != nil {
+				return err
+			}
+			if seen[m.ID] {
+				continue
+			}
+			seen[m.ID] = true
+			manifests = append(manifests, m)
 		}
-		if !forceYes && !confirm(fmt.Sprintf("Delete snapshot %s (%q)?", m.ID, m.Message)) {
-			fmt.Println("Aborted.")
-			return nil
+		if !forceYes {
+			what := fmt.Sprintf("snapshot %s (%q)", manifests[0].ID, manifests[0].Message)
+			if len(manifests) > 1 {
+				names := make([]string, len(manifests))
+				for i, m := range manifests {
+					names[i] = fmt.Sprintf("%s (%q)", m.ID, m.Message)
+				}
+				what = fmt.Sprintf("%d snapshots: %s", len(manifests), strings.Join(names, ", "))
+			}
+			if !confirm("Delete " + what + "?") {
+				fmt.Println("Aborted.")
+				return nil
+			}
 		}
-		if err := st.DeleteSnapshot(m.ID); err != nil {
-			return err
+		var fail int
+		for _, m := range manifests {
+			if err := st.DeleteSnapshot(m.ID); err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "failed to delete %s: %v\n", m.ID, err)
+				fail++
+			}
 		}
-		fmt.Printf("Deleted %s. Run `dockervc prune` to reclaim unreferenced objects.\n", m.ID)
+		if fail > 0 {
+			return fmt.Errorf("%d of %d snapshot(s) failed to delete", fail, len(manifests))
+		}
+		ids := make([]string, len(manifests))
+		for i, m := range manifests {
+			ids[i] = m.ID
+		}
+		fmt.Printf("Deleted %s. Run `dockervc prune` to reclaim unreferenced objects.\n",
+			strings.Join(ids, ", "))
 		return nil
 	},
 }

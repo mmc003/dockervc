@@ -6,6 +6,17 @@ validated against the code (including the in-flight Step 3 rollback code in
 `diskutil` output on this Mac, and Go library documentation. Format and depth
 follow ROLLBACK-PLAN.md.
 
+> **Amendment (2026-09-12, user decision):** the external-drive direction is
+> de-scoped. §2 (drive detection), the `drives` command (§1, §4.1), its
+> menu/TUI wiring (§4.2), and open questions §8.2–§8.4 are moot — export takes
+> an explicit `-o <path>` instead, defaulting to `exports/<snapshot-id>.dvca`
+> in the current directory (later made configurable via
+> `config set export.folder`; unsetting restores that default). Everything
+> else shipped as §3/§4/§5/§6 specify, with two
+> resolutions recorded in §8: Q1 (GNU `<hash>  <path>` checksums lines,
+> approved) and Q6 (import-as-repair stays deferred). Step 4 was implemented
+> against this amended scope on 2026-09-12; see HANDOFF.md §5 for what landed.
+
 ## 1. Recommended basic-tier scope
 
 ```
@@ -473,21 +484,30 @@ hook lands now via the phased portable API.**
    `tar xf`. Recommendation: write GNU-compatible `<hash>  <path>` (parser
    accepts both shapes regardless). Plan defaults to the HANDOFF-literal
    format unless you approve the deviation.
+   **Resolved 2026-09-12: GNU-compatible `<hash>  <path>` approved and
+   shipped; the parser accepts both shapes.**
 2. **`dockervc drives` as its own command + menu row** — recommended yes (it
    is portability UX, not store health, so not doctor-adjacent); say the word
    if you'd rather keep the command surface minimal.
+   **Moot 2026-09-12: de-scoped with the whole drives direction (see the
+   amendment above).**
 3. **Unmounted external disks on macOS** — list-with-mount-hint only
    (recommended), or auto-mount via `diskutil mountDisk` behind a confirm?
+   **Moot 2026-09-12: de-scoped (see the amendment above).**
 4. **Windows fixed-disk externals** — acceptable that `DRIVE_REMOVABLE`
    drives auto-default for `-o` while USB HDD/SSDs (usually `DRIVE_FIXED`)
    must be chosen explicitly via `-o E:\…` (they're still listed)? Digging
    further needs WMI/MSFT_PhysicalDisk.
+   **Moot 2026-09-12: de-scoped (see the amendment above).**
 5. **Coordination with Step 3** — both steps touch `interactive.go`/`tui.go`
    (menu rows, confirmDestructive, resetCommandFlags). Recommendation: land
    Step 4 after rollback merges; this plan's edits are disjoint from
    ROLLBACK-PLAN §5.7–5.8 but sit in the same regions.
+   **Resolved 2026-09-12: Step 3 had already landed; Step 4 chained the
+   public rollback API for `--apply` with zero changes to rollback.go.**
 6. **Import-as-repair** — confirm the §7 defer (or pull `--from <archive>`
    only, dropping `--from <dir>, into basic if the broken-snapshot demo
    scenario matters to you now).
+   **Resolved 2026-09-12: stays deferred to 0.7.x as §7 recommends.**
 
 Sources for the research claims: [golang.org/x/sys/windows docs](https://pkg.go.dev/golang.org/x/sys/windows), [drive enumeration on Windows (SO)](https://stackoverflow.com/questions/23128148/how-can-i-get-a-listing-of-all-drives-on-windows-using-golang), [disk free space via GetDiskFreeSpaceEx (SO)](https://stackoverflow.com/questions/20108520/get-amount-of-free-disk-space-using-go), [StackExchange/wmi (archived; go-ole, no CGO)](https://github.com/stackexchange/wmi), [Win32_LogicalDisk DriveType](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-logicaldisk), [GetVolumeInformation (not wrapped by x/sys)](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getvolumeinformationa), [removable flag misses USB SSDs (AskUbuntu)](https://askubuntu.com/questions/168650/how-do-i-list-all-storage-devices-thumb-drives-external-hd-that-are-), [lsblk RM vs TRAN (linuxize)](https://linuxize.com/post/lsblk-command-in-linux/), [howett.net/go-plist](https://github.com/DHowett/go-plist), [gousbdrivedetector (abandoned)](https://github.com/deepakjois/gousbdrivedetector), [ejectable-flag quirks on Thunderbolt (SO)](https://stackoverflow.com/questions/38499860/).

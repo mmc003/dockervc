@@ -47,7 +47,8 @@ internal/cli/                cobra command tree + full-screen TUI
                              `verify` lives here too as a deprecated alias of doctor --deep
   doctor.go                  doctor: structural + --deep health check, --repair flow,
                              BrokenSuffix() powering the ✗ BROKEN markers in `log`
-  stubs.go                   rollback / export / import — STUBS YOU WILL REPLACE
+  rollback.go                rollback command (full/granular, --dry-run, checkpoint)
+  export.go, import.go       .dvca export/import commands (Step 4); stubs.go deleted
   interactive.go             `dockervc cli`/`man`: menu table, guided flows, runArgs(),
                              man page generator, resetCommandFlags()
   tui.go                     full-screen alternate-screen TUI (raw mode, key decode,
@@ -57,7 +58,10 @@ internal/dockerapi/          thin client over the Docker SDK (single *client.Cli
 internal/model/manifest.go   Manifest + per-entity records; ObjectHashes() = GC ref set
 internal/snapshot/           capture (capture.go), drift/diff (status.go),
                              volume file indexes (volindex.go), HumanBytes
-internal/store/              cas.go (PutBlob/OpenObject), db.go (SQLite), store.go (lock, GC)
+internal/rollback/           Step 3: plan builder + sequential executor
+internal/portable/           Step 4: .dvca writer (write.go) / reader (read.go)
+internal/store/              cas.go (PutBlob/OpenObject), adopt.go (AdoptObject),
+                             db.go (SQLite), store.go (lock, GC)
 packaging/install.sh         copies binary + docs into /usr/local (run via sudo)
 Makefile                     cross-compile, dist packaging (VERSION is bumped here)
 ```
@@ -155,6 +159,34 @@ already-present small image like busybox/alpine).
 
 ## 4. Step 3 — rollback (`internal/rollback`, replace the stub in stubs.go)
 
+> **Status: implemented** (0.5.0). `internal/rollback/plan.go` (pure planner +
+> scope parsing), `internal/rollback/apply.go` (sequential fail-fast executor),
+> `internal/dockerapi/restore.go` (thin restore wrappers + JSON→SDK mappers),
+> `internal/cli/rollback.go` (command, prompts, checkpoint, broken-snapshot
+> refusal); stub removed from stubs.go; TUI/menu wired (§6 checked off below).
+> Deviations from the spec above, all forced by engine reality:
+>
+> - **Image load IDs from the load response, not the tar.** On containerd
+>   image-store engines (Docker Desktop default) the save tar's config digest
+>   is NOT the image ID, so `ImageLoadID` loads non-quiet and parses the
+>   daemon's own `Loaded image ID:` line. Quiet would suppress the only
+>   reliable source.
+> - **No in-memory hash→image-ID map.** Committed filesystems are loaded under
+>   a deterministic restore tag `dockervc/restore/<snapID>/<name>` and
+>   containers are created against that tag — the engine itself is the map, and
+>   re-runs after partial failure skip already-loaded filesystems.
+> - **Plan carries skip steps and drift warnings**: images already present /
+>   filesystems already loaded render as `skip …` lines (honest dry-runs);
+>   existing networks are reused with a warning when driver/subnets drifted;
+>   anonymous or uncaptured volumes, missing bind sources and config-only
+>   networks warn instead of failing silently.
+> - **TUI menu flow passes `--all`**: a scope-less rollback cannot prompt
+>   inside the TUI (confirm() is suppressed under raw mode), so the menu asks
+>   pick → dry-run preview → apply, and applies with `--all --yes`. The `:`
+>   mode requires an explicit scope flag and says so.
+> - **Broken snapshots are refused** before any planning (`missingObjects`,
+>   the same check `doctor` reports).
+
 The stub command already promises this surface — keep it exactly:
 
 ```
@@ -227,6 +259,38 @@ prints the plan and exits 0 without touching Docker or the store.
 
 ## 5. Step 4 — export/import (`internal/portable`, replace stubs)
 
+> **Status: implemented** (2026-09-12, uncommitted working tree). Amended
+> scope per user decision: the external-drive direction (`internal/drives`,
+> the `drives` command, drive detection) is de-scoped — export is plain
+> `-o <path>`, and without `-o` it defaults to `exports/<snapshot-id>.dvca` in
+> the current directory (the `export.folder` setting, settable and clearable
+> via `config set/unset`, overrides that) with a printed notice.
+> Landed: `internal/portable/write.go`
+> (Exporter), `read.go` (IndexArchive → Adopt → Register),
+> `internal/store/adopt.go` (AdoptObject), `internal/cli/export.go` +
+> `import.go`; stubs.go deleted; TUI/menu wired (§6 checked off below).
+> Deviations from the spec above, all user-approved or mechanical:
+>
+> - **checksums.sha256 lines are GNU `<hash>  <path>`**, not the literal
+>   `"sha256 <hash>  <path>"` — a plain `shasum -a 256 -c` can verify an
+>   unpacked archive with no dockervc present. The parser accepts both shapes.
+> - **`AdoptObject(hash, kind string, size int64, src io.Reader) (adopted
+>   bool, err error)`** — returns whether the bytes were new, and on a dedup
+>   hit (object already in the store) it still streams and re-hashes the
+>   incoming bytes: a tampered archive must fail even when every object is
+>   already local.
+> - **Import is three phases**, not one pass: `IndexArchive` (decode +
+>   canonical manifest re-hash vs the checksums line, before anything is
+>   written) → `Adopt` (stream, verify, place verbatim) → `Register`
+>   (ID-collision policy; same manifest hash → `ErrAlreadyImported` no-op).
+> - Export refuses broken snapshots (the same `missingObjects` gate rollback
+>   uses), refuses an existing `-o` target without `--yes`, does a best-effort
+>   free-space check (`syscall.Statfs`, unix; skipped on Windows), and lands
+>   the file atomically via `tmp/` + rename.
+> - `import --apply` chains the **public** rollback API unchanged
+>   (`rollbackPrompt`/`printRollbackWarnings` reused from rollback.go, same
+>   package) and takes a pre-apply checkpoint snapshot first.
+
 `dockervc export <snap> -o state.dvca [--latest]` / `dockervc import
 state.dvca [--apply]`. `--apply` = import, then run the rollback machinery
 against the imported snapshot (with its own confirmation). `--split` is
@@ -239,7 +303,7 @@ gain. (This deviates from the original DESIGN sketch deliberately.)
 
 ```
 manifest.json          exact model.Manifest JSON (same bytes as snapshots.manifest)
-checksums.sha256       one "sha256 <hash>  <path>" line per entry:
+checksums.sha256       one GNU "<hash>  <path>" line per entry:
                        manifest.json itself + every objects/<hash>
 objects/<hash>         CAS blob bytes VERBATIM (compressed), filename = hash
 ```
@@ -281,22 +345,29 @@ Objects → `volume`; IndexObjects → `volindex`; bindmounts → `bindmount`.
 The TUI wraps the real command tree; new commands must be wired or they will
 be invisible there (or worse, deadlock raw mode):
 
-- [ ] `stubs.go`: delete the replaced stubs; real commands keep
+- [x] `stubs.go`: delete the replaced stubs; real commands keep
       `Annotations: map[string]string{needsStore: "true"}`.
-- [ ] `interactive.go` `menuActions`: update rollback/export/import rows
+      (all three replaced — rollback.go, export.go, import.go; stubs.go gone)
+- [x] `interactive.go` `menuActions`: update rollback/export/import rows
       (desc no longer "planned"); add guided flows if useful (rollback: pick
       snapshot + scope prompt).
-- [ ] `interactive.go` `snapArgSlots`: `"rollback"` and `"export"` are
+      (all live; `guidedRollback` asks per kind, `guidedExport` picks snapshot +
+      output path, `guidedImport` asks path + --apply)
+- [x] `interactive.go` `snapArgSlots`: `"rollback"` and `"export"` are
       already registered — keep them working (Tab-completes snapshot args).
-- [ ] `interactive.go` `resetCommandFlags`: reset any new package-level flag
+      (verified live + `TestTabCompletesRollbackSnapshotArg`)
+- [x] `interactive.go` `resetCommandFlags`: reset any new package-level flag
       vars, or flags leak between TUI executions (bit us before).
-- [ ] `tui.go` `confirmDestructive`: route rollback (and `import --apply`)
+      (`rollbackOpts`, `exportOpts`, `importOpts` zeroed)
+- [x] `tui.go` `confirmDestructive`: route rollback (and `import --apply`)
       through the TUI y/n dialog + implicit `--yes` — their console
       `confirm()` would be invisible in raw mode and hang the TUI.
-- [ ] `man` updates itself from `LocalFlags()` — just verify.
-- [ ] Destructive console path: always honor `--yes`, default to
+      (both routed; `TestConfirmDestructiveImportApply` covers the import case)
+- [x] `man` updates itself from `LocalFlags()` — just verify.
+      (rollback + its flags render automatically)
+- [x] Destructive console path: always honor `--yes`, default to
       `confirm()`.
-- [ ] Long operations: print progress lines to stdout (TUI captures them);
+- [x] Long operations: print progress lines to stdout (TUI captures them);
       never read stdin outside `confirm()`/guided flows.
 
 ## 7. Demo environment (live verification)
@@ -318,13 +389,29 @@ Running on this machine (recreate cheaply if wiped): containers `demo-web`
 
 ## 8. Definition of done
 
-- [ ] `go vet ./...` and `go test ./...` green, including new tests
+- [x] `go vet ./...` and `go test ./...` green, including new tests
 - [ ] `make dist` succeeds; `VERSION` bumped; user reinstall verified
-- [ ] Rollback: `--dry-run` plan correct on demo env; full rollback restores
+      (VERSION → 0.5.0 set; dist/reinstall handled by the maintainer)
+- [x] Rollback: `--dry-run` plan correct on demo env; full rollback restores
       a deleted container + a mutated volume; granular scope touches nothing
       else; `--keep-current` skips the checkpoint
-- [ ] Export/import: round-trip into a fresh store byte-identical; corrupted
+      (all verified live on the demo env; broken snapshots refused cleanly)
+- [x] Export/import: round-trip into a fresh store byte-identical; corrupted
       archive rejected cleanly; `--apply` chains into rollback
-- [ ] TUI: all new commands usable via menu/`:`/Tab-completion; destructive
+      (verified live 2026-09-12 on the demo env: export → tar layout +
+      `shasum -a 256 -c` all OK → import into a second temp store (identical
+      62.8 MiB size, same message/dates) → re-import no-op; broken snapshot,
+      truncated archive, tampered object bytes and existing `-o` all refused
+      with exit 1 and no partial state; `import --apply` took a checkpoint,
+      recreated a deleted demo-web + demo-worker and restored a mutated
+      demo-data volume; declining the confirm left the import in place)
+- [x] TUI: all new commands usable via menu/`:`/Tab-completion; destructive
       ops confirmed via dialog; no hangs under raw mode
-- [ ] README.md + DESIGN.md status rows updated; HANDOFF.md marked done
+      (verified for rollback, including a full TUI-driven apply; export/import
+      wired the same way — menu flows, `:` command mode, Tab-completing
+      `export <snap>`, dialog-gated `import --apply` — and covered by
+      `TestConfirmDestructiveImportApply` + the runArgs round-trip tests)
+- [x] README.md + DESIGN.md status rows updated; HANDOFF.md marked done
+      (README usage block + status row, DESIGN format section + build-out
+      row, this file §1/§5/§6/§8 — all uncommitted under the 0.5.0 testing
+      hold, like the code)

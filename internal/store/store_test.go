@@ -160,3 +160,23 @@ func TestGetSnapshotByPrefix(t *testing.T) {
 		t.Fatal("unknown id should error")
 	}
 }
+
+func TestConfigDelete(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.ConfigSet("export.folder", "/tmp/exports"); err != nil {
+		t.Fatalf("ConfigSet: %v", err)
+	}
+	if err := s.ConfigDelete("export.folder"); err != nil {
+		t.Fatalf("ConfigDelete: %v", err)
+	}
+	if v, ok, err := s.ConfigGet("export.folder"); err != nil || ok || v != "" {
+		t.Fatalf("after delete: got (%q, %v, %v), want unset", v, ok, err)
+	}
+	// deleting an unset key is a no-op, and unrelated keys survive
+	if err := s.ConfigDelete("export.folder"); err != nil {
+		t.Fatalf("second delete must not error: %v", err)
+	}
+	if v, ok, err := s.ConfigGet("zstd_level"); err != nil || !ok || v == "" {
+		t.Fatalf("zstd_level (set at init) should survive: got (%q, %v, %v)", v, ok, err)
+	}
+}

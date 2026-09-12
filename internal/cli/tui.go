@@ -120,7 +120,20 @@ const (
 	dlgText dialogKind = iota // free-form input
 	dlgBool                   // y/n
 	dlgPick                   // snapshot picker: type to filter, arrows+Enter
+	dlgList                   // generic list: single-choice or checklist
 )
+
+// listItem is one row of a list dialog: a label, an optional status note
+// ("deleted", "exists — contents replaced"…) and the token it contributes
+// to the resulting command when picked. In checklists, rows flagged `on`
+// start checked — the caller marks the entities already gone from the
+// engine, so one Enter restores exactly what was lost.
+type listItem struct {
+	text  string
+	note  string
+	value string
+	on    bool
+}
 
 type dialog struct {
 	kind     dialogKind
@@ -131,6 +144,13 @@ type dialog struct {
 	pickSel  int
 	textDone func(t *tui, val string, ok bool)
 	boolDone func(t *tui, val bool, ok bool)
+
+	items    []listItem // dlgList rows
+	multi    bool       // dlgList: checkboxes (space toggles) vs single choice
+	checked  []bool     // dlgList checkbox state, parallel to items
+	listDone func(t *tui, vals []string, ok bool)
+
+	path bool // dlgText: the value is a filesystem path (Tab completes it)
 }
 
 // ── the TUI ───────────────────────────────────────────────────────────────────
@@ -148,9 +168,10 @@ type tui struct {
 	outLines []string
 	scroll   int
 
-	inInput bool // ':' raw command mode
-	input   string
-	comp    []store.SnapshotRow // live completion candidates
+	inInput  bool // ':' raw command mode
+	input    string
+	comp     []store.SnapshotRow // live snapshot-id completion candidates
+	pathComp []string            // live filesystem-path completion candidates
 
 	dlg   *dialog
 	flash string
@@ -331,6 +352,10 @@ func (t *tui) dialogKey(r rune, k key) {
 			if runes := []rune(d.value); len(runes) > 0 {
 				d.value = string(runes[:len(runes)-1])
 			}
+		case keyTab:
+			if d.path {
+				d.completePath()
+			}
 		case keyNone:
 			d.value += string(r)
 		}
@@ -384,6 +409,68 @@ func (t *tui) dialogKey(r rune, k key) {
 			d.value += string(r)
 			d.pickSel = 0
 		}
+	case dlgList:
+		n := len(d.items)
+		switch k {
+		case keyEsc:
+			t.dlg = nil
+			d.listDone(t, nil, false)
+		case keyUp:
+			if d.pickSel > 0 {
+				d.pickSel--
+			}
+		case keyDown:
+			if d.pickSel < n-1 {
+				d.pickSel++
+			}
+		case keyEnter:
+			if n == 0 {
+				return
+			}
+			t.dlg = nil
+			if d.multi {
+				var vals []string
+				for i, on := range d.checked {
+					if on {
+						vals = append(vals, d.items[i].value)
+					}
+				}
+				d.listDone(t, vals, true)
+			} else {
+				if d.pickSel >= n {
+					d.pickSel = n - 1
+				}
+				d.listDone(t, []string{d.items[d.pickSel].value}, true)
+			}
+		case keyNone:
+			switch r {
+			case 'j':
+				if d.pickSel < n-1 {
+					d.pickSel++
+				}
+			case 'k':
+				if d.pickSel > 0 {
+					d.pickSel--
+				}
+			case ' ', 'x', 'X':
+				if d.multi && d.pickSel < len(d.checked) {
+					d.checked[d.pickSel] = !d.checked[d.pickSel]
+				}
+			case 'a':
+				if d.multi && len(d.checked) > 0 {
+					anyOn := false
+					for _, on := range d.checked {
+						if on {
+							anyOn = true
+							break
+						}
+					}
+					for i := range d.checked {
+						d.checked[i] = !anyOn
+					}
+				}
+			}
+		}
 	}
 }
 
@@ -431,16 +518,32 @@ func (t *tui) runMenuAction(i int) {
 			})
 		})
 	case "delete":
-		t.askPick("delete which snapshot?", func(id string, ok bool) {
+		t.askDeleteSnapshots()
+	case "rollback":
+		t.askPick("roll back to which snapshot?", func(id string, ok bool) {
 			if !ok || id == "" {
 				return
 			}
-			t.askBool("delete this snapshot?", false, func(yes bool, ok bool) {
-				if ok && yes {
-					t.execTUI("delete", "--yes", id)
+			t.askRollbackScope(id)
+		})
+	case "export":
+		t.askPick("export which snapshot?", func(id string, ok bool) {
+			if !ok || id == "" {
+				return
+			}
+			// Default suggestion: the export.folder setting, else
+			// exports/<snapID>.dvca next to where dockervc was started.
+			t.askPath("output path", defaultExportPath(id), func(path string, ok bool) {
+				if !ok || path == "" {
+					return
 				}
+				t.execTUI("export", id, "-o", path)
 			})
 		})
+	case "import":
+		t.askImportArchive()
+	case "config":
+		t.askConfig()
 	case "doctor":
 		t.askBool("deep check — re-hash every object? (slower)", false, func(deep bool, ok bool) {
 			if !ok {
@@ -476,6 +579,33 @@ func (t *tui) askText(title, def string, done func(val string, ok bool)) {
 		textDone: func(t *tui, val string, ok bool) { done(val, ok) }}
 }
 
+// askPath shows a text dialog for a filesystem path — Tab completes the
+// value against the directory being typed in, and the matches are listed
+// above the input line while typing.
+func (t *tui) askPath(title, def string, done func(val string, ok bool)) {
+	t.dlg = &dialog{kind: dlgText, title: title, def: def, path: true,
+		textDone: func(t *tui, val string, ok bool) { done(val, ok) }}
+}
+
+// completePath extends a path dialog's value with the unique directory
+// match, or the longest common prefix of the matches.
+func (d *dialog) completePath() {
+	if d.value == "" {
+		return
+	}
+	ms := pathMatches(d.value)
+	if len(ms) == 0 {
+		return
+	}
+	repl := ms[0]
+	if len(ms) > 1 {
+		repl = lcp(ms)
+	}
+	if len(repl) > len(d.value) {
+		d.value = repl
+	}
+}
+
 func (t *tui) askBool(title string, def bool, done func(val bool, ok bool)) {
 	t.dlg = &dialog{kind: dlgBool, title: title, boolVal: def,
 		boolDone: func(t *tui, val bool, ok bool) { done(val, ok) }}
@@ -486,9 +616,120 @@ func (t *tui) askPick(title string, done func(val string, ok bool)) {
 		textDone: func(t *tui, val string, ok bool) { done(val, ok) }}
 }
 
-// confirmDestructive intercepts delete/prune typed in raw ':' mode so their
-// own [y/N] prompt (invisible inside the TUI) never blocks on hidden input.
-// Menu flows pre-confirm and pass --yes themselves.
+// askListOne shows a single-choice list dialog — askPick for non-snapshot
+// lists. Arrows/j/k move, Enter picks, Esc cancels.
+func (t *tui) askListOne(title string, items []listItem, done func(val string, ok bool)) {
+	t.dlg = &dialog{kind: dlgList, title: title, items: items,
+		listDone: func(t *tui, vals []string, ok bool) {
+			if ok && len(vals) > 0 {
+				done(vals[0], true)
+			} else {
+				done("", false)
+			}
+		}}
+}
+
+// askListMany shows a checklist dialog. Boxes start checked only for rows
+// the caller flagged `on` — entities gone from the engine — so the default
+// Enter restores what was lost and leaves existing entities alone.
+// space/x toggle, a flips all.
+func (t *tui) askListMany(title string, items []listItem, done func(vals []string, ok bool)) {
+	checked := make([]bool, len(items))
+	for i := range checked {
+		checked[i] = items[i].on
+	}
+	t.dlg = &dialog{kind: dlgList, title: title, items: items, multi: true, checked: checked,
+		listDone: func(t *tui, vals []string, ok bool) { done(vals, ok) }}
+}
+
+// askScope collects what a rollback restores: everything (--all, the
+// default) or per-kind name lists — the full-screen equivalent of the line
+// menu's guidedRollback prompts. done receives the flag tokens, or nil when
+// nothing was selected (a rollback must name what it restores).
+func (t *tui) askScope(done func(scope []string)) {
+	t.askBool("restore everything (--all)?", true, func(all bool, ok bool) {
+		if !ok {
+			return
+		}
+		if all {
+			done([]string{"--all"})
+			return
+		}
+		var flags []string
+		var askKind func(kinds []string)
+		askKind = func(kinds []string) {
+			if len(kinds) == 0 {
+				if len(flags) == 0 {
+					t.flash = "nothing selected — a rollback must name what it restores"
+					done(nil)
+					return
+				}
+				done(flags)
+				return
+			}
+			kind := kinds[0]
+			t.askBool("restore any "+kind+"?", false, func(yes bool, ok bool) {
+				if !ok {
+					return
+				}
+				if !yes {
+					askKind(kinds[1:])
+					return
+				}
+				t.askText(kind+" names (comma-separated)", "", func(names string, ok bool) {
+					if !ok {
+						return
+					}
+					var list []string
+					for _, n := range strings.Split(names, ",") {
+						if n = strings.TrimSpace(n); n != "" {
+							list = append(list, n)
+						}
+					}
+					if len(list) > 0 {
+						flags = append(flags, "--"+kind, strings.Join(list, ","))
+					}
+					askKind(kinds[1:])
+				})
+			})
+		}
+		askKind([]string{"containers", "volumes", "images", "networks"})
+	})
+}
+
+// askDeleteSnapshots shows the multi-select deletion checklist. Nothing is
+// pre-checked — deleting is destructive, so the default is "none" and the
+// count is confirmed once before the batch runs.
+func (t *tui) askDeleteSnapshots() {
+	var items []listItem
+	for _, r := range t.snaps {
+		note := r.Message
+		if len(note) > 40 {
+			note = note[:40] + "…"
+		}
+		items = append(items, listItem{text: r.ID, note: note, value: r.ID})
+	}
+	t.askListMany("delete which snapshots?", items, func(ids []string, ok bool) {
+		if !ok {
+			return
+		}
+		if len(ids) == 0 {
+			t.flash = "nothing selected — space/x checks snapshots to delete"
+			t.askDeleteSnapshots()
+			return
+		}
+		t.askBool(fmt.Sprintf("delete %d snapshot(s)?", len(ids)), false, func(yes bool, ok bool) {
+			if !ok || !yes {
+				return
+			}
+			t.execTUI(append([]string{"delete", "--yes"}, ids...)...)
+		})
+	})
+}
+
+// confirmDestructive intercepts delete/prune/rollback typed in raw ':' mode so
+// their own [y/N] prompt (invisible inside the TUI) never blocks on hidden
+// input. Menu flows pre-confirm and pass --yes themselves.
 func (t *tui) confirmDestructive(argv []string, run func([]string)) {
 	// `:dockervc doctor --repair` must behave exactly like `:doctor --repair`:
 	// without stripping, the name check below silently misses the command and
@@ -500,8 +741,9 @@ func (t *tui) confirmDestructive(argv []string, run func([]string)) {
 		return
 	}
 	name := argv[0]
-	destructive := name == "delete" || name == "prune" ||
-		(name == "doctor" && containsArg(argv, "--repair")) // repair deletes
+	destructive := name == "delete" || name == "prune" || name == "rollback" ||
+		(name == "doctor" && containsArg(argv, "--repair")) || // repair deletes
+		(name == "import" && containsArg(argv, "--apply")) // --apply chains the destructive rollback
 	if !destructive {
 		run(argv)
 		return
@@ -602,65 +844,71 @@ func matchSnaps(rows []store.SnapshotRow, q string) []store.SnapshotRow {
 }
 
 // updateCompletions refreshes the live candidate list for the token being
-// typed in ':' mode, when that token sits in a snapshot-argument slot.
+// typed in ':' mode — snapshot ids when the token sits in a snapshot-argument
+// slot, filesystem paths for import's archive and export's -o value.
 func (t *tui) updateCompletions() {
 	t.comp = nil
+	t.pathComp = nil
 	toks := strings.Fields(t.input)
 	// `:dockervc diff …` completes like `:diff …` — skip a binary-name prefix.
 	if len(toks) > 0 && (toks[0] == "dockervc" || toks[0] == "./dockervc") {
 		toks = toks[1:]
 	}
-	if len(toks) == 0 { // empty after Enter or backspace-to-empty
-		return
-	}
-	slots, takesSnap := snapArgSlots[toks[0]]
-	if !takesSnap || len(toks) < 2 {
+	if len(toks) < 2 { // empty after Enter or backspace-to-empty
 		return
 	}
 	last := len(toks) - 1
-	isSlot := false
-	for _, s := range slots {
-		if last == s+1 {
-			isSlot = true
-		}
-	}
-	if !isSlot || strings.HasPrefix(toks[last], "-") {
+	if strings.HasPrefix(toks[last], "-") {
 		return
 	}
-	t.comp = matchSnaps(t.snaps, toks[last])
+	if slots, ok := snapArgSlots[toks[0]]; ok {
+		isSlot := toks[0] == "delete" // multi-delete: every positional is a snapshot id
+		for _, s := range slots {
+			if last == s+1 {
+				isSlot = true
+			}
+		}
+		if isSlot {
+			t.comp = matchSnaps(t.snaps, toks[last])
+			return
+		}
+		// export's remaining positional — the -o value — is a path; fall
+		// through to the path check below.
+	}
+	if pathToken(toks) {
+		t.pathComp = pathMatches(toks[last])
+	}
 }
 
 // tabComplete replaces the trailing token with the unique match, or extends
 // it to the longest common prefix of the matches.
 func (t *tui) tabComplete() {
 	toks := strings.Fields(t.input)
-	if len(toks) < 2 || len(t.comp) == 0 {
+	if len(toks) < 2 {
 		return
 	}
 	old := toks[len(toks)-1]
 	var repl string
-	if len(t.comp) == 1 {
+	switch {
+	case len(t.comp) == 1:
 		repl = t.comp[0].ID
-	} else {
-		repl = lcpIDs(t.comp)
-		if repl == old {
-			return // nothing to extend; the match list is already shown
+	case len(t.comp) > 1:
+		ids := make([]string, len(t.comp))
+		for i, r := range t.comp {
+			ids[i] = r.ID
 		}
+		repl = lcp(ids)
+	case len(t.pathComp) == 1:
+		repl = t.pathComp[0]
+	case len(t.pathComp) > 1:
+		repl = lcp(t.pathComp)
+	default:
+		return
+	}
+	if repl == old {
+		return // nothing to extend; the match list is already shown
 	}
 	t.input = t.input[:len(t.input)-len(old)] + repl
-}
-
-func lcpIDs(rows []store.SnapshotRow) string {
-	if len(rows) == 0 {
-		return ""
-	}
-	p := rows[0].ID
-	for _, r := range rows[1:] {
-		for !strings.HasPrefix(r.ID, p) && len(p) > 0 {
-			p = p[:len(p)-1]
-		}
-	}
-	return p
 }
 
 // expandSnapArgs resolves partial snapshot refs in argv to full ids. Returns
@@ -671,8 +919,21 @@ func (t *tui) expandSnapArgs(argv []string) ([]string, string) {
 		return argv, ""
 	}
 	out := append([]string(nil), argv...)
-	for _, s := range slots {
-		idx := s + 1 // argv[0] is the command name
+	// Multi-delete takes any number of ids, so every positional slot counts;
+	// other commands only expand their declared slots.
+	positions := make([]int, 0, len(out)-1)
+	if argv[0] == "delete" {
+		for idx := 1; idx < len(out); idx++ {
+			if !strings.HasPrefix(out[idx], "-") {
+				positions = append(positions, idx)
+			}
+		}
+	} else {
+		for _, s := range slots {
+			positions = append(positions, s+1) // argv[0] is the command name
+		}
+	}
+	for _, idx := range positions {
 		if idx >= len(out) {
 			break // that argument was not provided
 		}
@@ -706,9 +967,9 @@ func (t *tui) expandSnapArgs(argv []string) ([]string, string) {
 // ── command execution ─────────────────────────────────────────────────────────
 
 // execTUI runs argv through the real command tree, capturing output for the
-// output pane. Destructive commands (delete, prune) are confirmed with a TUI
-// dialog first and run with --yes — their own console [y/N] prompt would be
-// invisible here and would deadlock on raw-mode input.
+// output pane. Destructive commands (delete, prune, rollback) are confirmed
+// with a TUI dialog first and run with --yes — their own console [y/N] prompt
+// would be invisible here and would deadlock on raw-mode input.
 func (t *tui) execTUI(argv ...string) {
 	t.confirmDestructive(argv, func(argv []string) { t.doExec(argv...) })
 }
@@ -882,7 +1143,7 @@ func (t *tui) outputViewReserve(reserved int) [][2]any {
 }
 
 // candidateLines renders up to `budget` rows of live completion candidates
-// (a header line plus ids) for the ':' command line.
+// (a header line plus ids or paths) for the ':' command line.
 func (t *tui) candidateLines(budget int) [][2]any {
 	var out [][2]any
 	if len(t.comp) > 0 {
@@ -894,6 +1155,18 @@ func (t *tui) candidateLines(budget int) [][2]any {
 				break
 			}
 			out = append(out, [2]any{fmt.Sprintf("   %s  %s", r.ID, r.Message), false})
+		}
+		return out
+	}
+	if len(t.pathComp) > 0 {
+		out = append(out, [2]any{fmt.Sprintf(" %d path match(es) for %q — Tab completes:",
+			len(t.pathComp), currentToken(t.input)), false})
+		for i, p := range t.pathComp {
+			if len(out) >= budget-1 {
+				out = append(out, [2]any{fmt.Sprintf("   … %d more", len(t.pathComp)-i), false})
+				break
+			}
+			out = append(out, [2]any{"   " + p, false})
 		}
 	}
 	return out
@@ -920,8 +1193,63 @@ func (t *tui) dialogView() [][2]any {
 			}
 			out = append(out, [2]any{s, i == d.pickSel})
 		}
+	case dlgList:
+		out = append(out, [2]any{" " + d.title, false})
+		if len(d.items) == 0 {
+			out = append(out, [2]any{"   (nothing to list)", false})
+		}
+		// align the status notes within the rows
+		w := 0
+		for _, it := range d.items {
+			if len(it.text) > w {
+				w = len(it.text)
+			}
+		}
+		if w > t.w-24 {
+			w = t.w - 24
+		}
+		for i, it := range d.items {
+			if len(out) >= t.mainH()-1 {
+				out = append(out, [2]any{"   …", false})
+				break
+			}
+			box := "  " // single-choice rows have no checkbox
+			if d.multi {
+				box = "[ ]"
+				if d.checked[i] {
+					box = "[x]"
+				}
+			}
+			s := fmt.Sprintf("   %s %-*s", box, w, it.text)
+			if it.note != "" {
+				s += "  " + it.note
+			}
+			out = append(out, [2]any{s, i == d.pickSel})
+		}
 	default:
 		out = append(out, [2]any{" " + d.title, false})
+		// Path dialogs list the directory matches above the input line.
+		reserve := 1
+		if d.kind == dlgText && d.path && d.value != "" {
+			ms := pathMatches(d.value)
+			if len(ms) > 0 {
+				out = append(out, [2]any{fmt.Sprintf(" %d path match(es) — Tab completes:", len(ms)), false})
+				for i, m := range ms {
+					if i >= 5 {
+						out = append(out, [2]any{fmt.Sprintf("   … %d more", len(ms)-i), false})
+						break
+					}
+					out = append(out, [2]any{"   " + m, false})
+				}
+				reserve = len(out) // rows the dialog takes from the output pane
+			}
+		}
+		// y/n and text dialogs sit over the output pane so the result they
+		// ask about (a dry-run plan, a doctor report) stays readable instead
+		// of flashing away when the dialog opens.
+		if t.inOutput {
+			out = append(out, t.outputViewReserve(reserve)...)
+		}
 	}
 	return out
 }
@@ -940,8 +1268,14 @@ func (t *tui) hintBar() string {
 	switch {
 	case t.dlg != nil && t.dlg.kind == dlgPick:
 		return " ↑↓ select · type to filter · Tab/Enter confirm · Esc cancel"
+	case t.dlg != nil && t.dlg.kind == dlgList && t.dlg.multi:
+		return " ↑↓/j/k move · space/x toggle · a all/none · Enter confirm · Esc cancel"
+	case t.dlg != nil && t.dlg.kind == dlgList:
+		return " ↑↓/j/k select · Enter confirm · Esc cancel"
 	case t.dlg != nil && t.dlg.kind == dlgBool:
 		return " y/n · Enter = default · Esc cancel"
+	case t.dlg != nil && t.dlg.path:
+		return " type path · Tab completes · Enter confirm · Esc cancel"
 	case t.dlg != nil:
 		return " type value · Enter confirm · Esc cancel"
 	case t.inInput && t.inOutput:
@@ -964,6 +1298,17 @@ func (t *tui) inputLine() string {
 			return fmt.Sprintf(" %s [y/N]", d.title)
 		case dlgPick:
 			return fmt.Sprintf(" filter: %s", d.value)
+		case dlgList:
+			if d.multi {
+				n := 0
+				for _, on := range d.checked {
+					if on {
+						n++
+					}
+				}
+				return fmt.Sprintf(" %d of %d selected — Enter confirms", n, len(d.items))
+			}
+			return " Enter picks the highlighted row"
 		default:
 			def := ""
 			if d.def != "" {

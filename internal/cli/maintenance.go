@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 
@@ -70,7 +71,7 @@ var verifyCmd = &cobra.Command{
 }
 
 var configCmd = &cobra.Command{
-	Use:   "config [get <key> | set <key> <value>]",
+	Use:   "config [get <key> | set <key> <value> | unset <key>]",
 	Short: "View or change store settings",
 	Annotations: map[string]string{needsStore: "true"},
 	Args:  cobra.RangeArgs(0, 3),
@@ -108,10 +109,29 @@ var configCmd = &cobra.Command{
 			}
 			fmt.Printf("%s = %s\n", args[1], args[2])
 			return nil
+		case len(args) == 2 && args[0] == "unset":
+			if !knownSetting(args[1]) {
+				return fmt.Errorf("unknown setting %q (known: zstd_level, export.folder)", args[1])
+			}
+			if err := st.ConfigDelete(args[1]); err != nil {
+				return err
+			}
+			fmt.Printf("%s unset — back to its default\n", args[1])
+			return nil
 		default:
-			return fmt.Errorf("usage: dockervc config [get <key> | set <key> <value>]")
+			return fmt.Errorf("usage: dockervc config [get <key> | set <key> <value> | unset <key>]")
 		}
 	},
+}
+
+// knownSetting reports whether key names a settable store setting (unset
+// needs this check alone — there is no value to validate).
+func knownSetting(key string) bool {
+	switch key {
+	case "zstd_level", "export.folder":
+		return true
+	}
+	return false
 }
 
 func validateConfig(key, value string) error {
@@ -122,8 +142,13 @@ func validateConfig(key, value string) error {
 			return fmt.Errorf("zstd_level must be an integer 1–22")
 		}
 		return nil
+	case "export.folder":
+		if fi, err := os.Stat(expandHome(value)); err != nil || !fi.IsDir() {
+			return fmt.Errorf("export.folder must be an existing directory (got %q)", value)
+		}
+		return nil
 	default:
-		return fmt.Errorf("unknown setting %q (known: zstd_level)", key)
+		return fmt.Errorf("unknown setting %q (known: zstd_level, export.folder)", key)
 	}
 }
 

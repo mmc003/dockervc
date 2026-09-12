@@ -110,6 +110,33 @@ func TestConfirmDestructivePrefixNonDestructive(t *testing.T) {
 	}
 }
 
+// `:import --apply x.dvca` routes through the y/n dialog (its console
+// confirm() would hang raw mode); plain `import` is additive and runs
+// directly, like snapshot.
+func TestConfirmDestructiveImportApply(t *testing.T) {
+	tt := &tui{}
+	var ran []string
+	tt.confirmDestructive([]string{"import", "x.dvca"},
+		func(argv []string) { ran = argv })
+	if !equalStrings(ran, []string{"import", "x.dvca"}) {
+		t.Fatalf("plain import must run directly: %v", ran)
+	}
+
+	ran = nil
+	tt.confirmDestructive([]string{"import", "--apply", "x.dvca"},
+		func(argv []string) { ran = argv })
+	if len(ran) != 0 {
+		t.Fatalf("--apply ran without asking: %v", ran)
+	}
+	if tt.dlg == nil || tt.dlg.kind != dlgBool {
+		t.Fatalf("want y/n dialog for import --apply, got %+v", tt.dlg)
+	}
+	tt.dialogKey('y', keyNone)
+	if !equalStrings(ran, []string{"import", "--yes", "--apply", "x.dvca"}) {
+		t.Fatalf("ran = %v, want import --yes --apply x.dvca", ran)
+	}
+}
+
 // confirm() must never read stdin while the TUI is active — its prompt is
 // invisible there (output captured) and raw-mode keys can't reliably end it.
 func TestConfirmSuppressedInTUI(t *testing.T) {
@@ -127,6 +154,62 @@ func TestUpdateCompletionsSkipsPrefix(t *testing.T) {
 	tt.updateCompletions()
 	if len(tt.comp) != 1 || tt.comp[0].ID != "snap-1" {
 		t.Fatalf("comp = %+v, want snap-1", tt.comp)
+	}
+}
+
+// Tab completion in a rollback command's snapshot slot. The fixtures mirror a
+// real rollback session, where a pre-rollback checkpoint's MESSAGE embeds the
+// id of the snapshot it precedes — matchSnaps counts those as matches too, so
+// Tab's result depends on message content, not just ids.
+func TestTabCompletesRollbackSnapshotArg(t *testing.T) {
+	rows := []store.SnapshotRow{
+		{ID: "snap-20260912-121128-476e", Message: "pre-rollback checkpoint before snap-20260912-120452-3469"},
+		{ID: "snap-20260912-120452-3469", Message: "pre-rollback checkpoint before snap-20260912-115819-d17d"},
+		{ID: "snap-20260912-120246-fc26", Message: "pre-rollback checkpoint before snap-20260912-115819-d17d"},
+		{ID: "snap-20260912-115819-d17d", Message: "rollback baseline"},
+	}
+
+	// Unique prefix — 3469 matches by id and nothing mentions it in a
+	// message — Tab replaces the token with the full id. Replay real
+	// keystrokes through inputKey so completion state updates exactly as it
+	// does while typing.
+	tt := &tui{inInput: true, snaps: []store.SnapshotRow{
+		{ID: "snap-20260912-120452-3469", Message: "pre-rollback checkpoint before snap-20260912-115819-d17d"},
+		{ID: "snap-20260912-115819-d17d", Message: "rollback baseline"},
+	}}
+	for _, r := range "rollback snap-20260912-1204" {
+		tt.inputKey(r, keyNone)
+	}
+	tt.inputKey(0, keyTab)
+	if want := "rollback snap-20260912-120452-3469"; tt.input != want {
+		t.Fatalf("after Tab: input = %q, want %q", tt.input, want)
+	}
+
+	// Two matches — 3469 by id prefix AND 476e, whose checkpoint message
+	// embeds 3469's id — so Tab extends only to the longest common prefix.
+	// This is exactly the case observed live (1204 → Tab → …-12): correct
+	// lcp behavior over two real matches, not a completion defect.
+	tt = &tui{inInput: true, snaps: rows}
+	for _, r := range "rollback snap-20260912-1204" {
+		tt.inputKey(r, keyNone)
+	}
+	if len(tt.comp) != 2 {
+		t.Fatalf("comp = %d rows, want 2 (id prefix + message match)", len(tt.comp))
+	}
+	tt.inputKey(0, keyTab)
+	if want := "rollback snap-20260912-12"; tt.input != want {
+		t.Fatalf("two-match Tab: input = %q, want %q", tt.input, want)
+	}
+
+	// An ambiguous prefix (the baseline's id appears in every checkpoint
+	// message) also extends to the longest common prefix.
+	tt = &tui{inInput: true, snaps: rows}
+	for _, r := range "rollback snap-20260912-11" {
+		tt.inputKey(r, keyNone)
+	}
+	tt.inputKey(0, keyTab)
+	if want := "rollback snap-20260912-1"; tt.input != want {
+		t.Fatalf("ambiguous Tab: input = %q, want %q", tt.input, want)
 	}
 }
 
@@ -178,5 +261,63 @@ func TestProblemCountIn(t *testing.T) {
 	}
 	if _, ok := problemCountIn([]string{"snapshots: 1 checked, all reference their objects"}); ok {
 		t.Fatal("healthy report must not parse as problems")
+	}
+}
+
+// y/n dialogs render over the output pane — the dry-run plan that a
+// rollback's "apply now?" question refers to must stay on screen instead of
+// flashing away when the dialog opens.
+func TestBoolDialogKeepsOutputPane(t *testing.T) {
+	tt := &tui{h: 24, w: 80, inOutput: true,
+		outTitle: "rollback --dry-run snap-1",
+		outLines: []string{"1. stop+remove container demo-web", "2. restore volume demo-data"},
+		dlg:      &dialog{kind: dlgBool, title: "apply the rollback now?"}}
+	joined := ""
+	for _, r := range tt.bodyView() {
+		joined += r[0].(string) + "\n"
+	}
+	if !strings.Contains(joined, "apply the rollback now?") {
+		t.Fatalf("dialog question missing:\n%s", joined)
+	}
+	if !strings.Contains(joined, "1. stop+remove container demo-web") {
+		t.Fatalf("plan not visible under the dialog:\n%s", joined)
+	}
+}
+
+// askScope mirrors guidedRollback: everything → --all; per-kind y/n + a
+// comma-separated name list → the corresponding flags; nothing selected →
+// nil, so no rollback runs.
+func TestAskScope(t *testing.T) {
+	tt := &tui{h: 24, w: 80}
+	var got []string
+	tt.askScope(func(scope []string) { got = scope })
+
+	tt.dialogKey(0, keyEnter) // everything (default yes)
+	if !equalStrings(got, []string{"--all"}) {
+		t.Fatalf("scope = %v, want [--all]", got)
+	}
+
+	got = nil
+	tt.askScope(func(scope []string) { got = scope })
+	tt.dialogKey('n', keyNone) // not everything
+	tt.dialogKey('y', keyNone) // containers?
+	for _, r := range "demo-web, demo-worker" {
+		tt.dialogKey(r, keyNone)
+	}
+	tt.dialogKey(0, keyEnter)  // submit names
+	tt.dialogKey('n', keyNone) // volumes?
+	tt.dialogKey('n', keyNone) // images?
+	tt.dialogKey('n', keyNone) // networks?
+	if !equalStrings(got, []string{"--containers", "demo-web,demo-worker"}) {
+		t.Fatalf("scope = %v, want --containers demo-web,demo-worker", got)
+	}
+
+	got = []string{"sentinel"}
+	tt.askScope(func(scope []string) { got = scope })
+	for range 5 {
+		tt.dialogKey('n', keyNone) // everything + all four kinds declined
+	}
+	if got != nil {
+		t.Fatalf("scope = %v, want nil (nothing selected)", got)
 	}
 }

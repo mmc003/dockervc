@@ -58,13 +58,13 @@ var menuActions = []action{
 	{"log", "", "list snapshots", nil},
 	{"show", "<snap>", "inspect one snapshot", guidedShow},
 	{"diff", "<snapA> [snapB]", "compare snapshots; --files <vol> lists changed files", guidedDiff},
-	{"delete", "<snap>", "drop a snapshot", guidedDelete},
+	{"delete", "<snap>…", "drop one or more snapshots", guidedDelete},
 	{"doctor", "[--deep] [--repair]", "store health check; offers repair when problems are found", guidedDoctor},
 	{"prune", "", "reclaim storage from unreferenced objects", nil},
-	{"config", "", "view or change store settings", nil},
-	{"rollback", "<snap>", "restore engine state (planned — Step 3)", nil},
-	{"export", "<snap>", "portable archive (planned — Step 4)", nil},
-	{"import", "<archive>", "load an archive (planned — Step 4)", nil},
+	{"config", "[get|set|unset]", "view or change store settings", guidedConfig},
+	{"rollback", "<snap> [--all]", "restore engine state from a snapshot", guidedRollback},
+	{"export", "<snap> [-o <file>]", "package a snapshot into a portable .dvca archive", guidedExport},
+	{"import", "<archive.dvca>", "add an archive's snapshot to this store", guidedImport},
 }
 
 // RunInteractive runs the menu loop until quit/EOF.
@@ -171,6 +171,23 @@ func resetCommandFlags() {
 	diffFiles = ""
 	doctorRepair = false
 	doctorDeep = false
+	rollbackOpts = struct {
+		all         bool
+		containers  []string
+		volumes     []string
+		images      []string
+		networks    []string
+		dryRun      bool
+		keepCurrent bool
+	}{}
+	exportOpts = struct {
+		out    string
+		latest bool
+		split  string
+	}{}
+	importOpts = struct {
+		apply bool
+	}{}
 }
 
 // ── guided flows ─────────────────────────────────────────────────────────────
@@ -204,12 +221,122 @@ func guidedDiff(r *bufio.Reader) []string {
 	return []string{"diff", a, b}
 }
 
+// guidedDelete picks one or more snapshots; the command's own confirm names
+// the whole batch, so no --yes is pre-baked here.
 func guidedDelete(r *bufio.Reader) []string {
-	id := pickSnapshot(r, "delete which snapshot?", false)
+	ids := pickSnapshots(r, "delete which snapshot(s)?")
+	if len(ids) == 0 {
+		return nil
+	}
+	return append([]string{"delete"}, ids...)
+}
+
+// guidedRollback picks a snapshot, then asks per kind what to restore — a
+// container selection carries its image, mounted volumes and networks along.
+// Choosing every kind present collapses to --all (same selection, shorter
+// argv). No --yes here: the command itself prints the plan and asks once more,
+// which is the point of a rollback prompt.
+func guidedRollback(r *bufio.Reader) []string {
+	id := pickSnapshot(r, "roll back to which snapshot?", false)
 	if id == "" {
 		return nil
 	}
-	return []string{"delete", id} // its own confirm() runs inside
+	s, err := store.Open(storePath)
+	if err != nil {
+		fmt.Printf("cannot open store: %v\n", err)
+		return nil
+	}
+	m, err := s.GetSnapshot(id)
+	s.Close()
+	if err != nil {
+		fmt.Printf("cannot read snapshot %s: %v\n", id, err)
+		return nil
+	}
+	wantC := len(m.Containers) > 0 && promptBool(r, fmt.Sprintf("restore all %d container(s)?", len(m.Containers)), false)
+	wantV := len(m.Volumes) > 0 && promptBool(r, fmt.Sprintf("restore all %d volume(s)?", len(m.Volumes)), false)
+	wantI := len(m.Images) > 0 && promptBool(r, fmt.Sprintf("restore all %d image(s)?", len(m.Images)), false)
+	wantN := len(m.Networks) > 0 && promptBool(r, fmt.Sprintf("restore all %d network(s)?", len(m.Networks)), false)
+	if !wantC && !wantV && !wantI && !wantN {
+		fmt.Println("nothing selected — a rollback must name what it restores.")
+		return nil
+	}
+	if (wantC || len(m.Containers) == 0) && (wantV || len(m.Volumes) == 0) &&
+		(wantI || len(m.Images) == 0) && (wantN || len(m.Networks) == 0) {
+		return []string{"rollback", id, "--all"}
+	}
+	argv := []string{"rollback", id}
+	if wantC {
+		names := make([]string, 0, len(m.Containers))
+		for i := range m.Containers {
+			names = append(names, m.Containers[i].Name)
+		}
+		argv = append(argv, "--containers", strings.Join(names, ","))
+	}
+	if wantV {
+		names := make([]string, 0, len(m.Volumes))
+		for i := range m.Volumes {
+			names = append(names, m.Volumes[i].Name)
+		}
+		argv = append(argv, "--volumes", strings.Join(names, ","))
+	}
+	if wantI {
+		names := make([]string, 0, len(m.Images))
+		for i := range m.Images {
+			if len(m.Images[i].Refs) > 0 {
+				names = append(names, m.Images[i].Refs[0])
+			} else {
+				names = append(names, m.Images[i].Digest)
+			}
+		}
+		argv = append(argv, "--images", strings.Join(names, ","))
+	}
+	if wantN {
+		names := make([]string, 0, len(m.Networks))
+		for i := range m.Networks {
+			names = append(names, m.Networks[i].Name)
+		}
+		argv = append(argv, "--networks", strings.Join(names, ","))
+	}
+	return argv
+}
+
+// guidedExport picks a snapshot, then asks where to write the archive. The
+// suggested default matches the bare command: the export.folder setting,
+// else exports/<snapID>.dvca in the current directory.
+func guidedExport(r *bufio.Reader) []string {
+	id := pickSnapshot(r, "export which snapshot?", false)
+	if id == "" {
+		return nil
+	}
+	path := promptLine(r, "output path", defaultExportPath(id))
+	return []string{"export", id, "-o", path}
+}
+
+// guidedImport asks for the archive, then whether to chain straight into a
+// restore (--apply). The command's own single confirm covers the apply.
+func guidedImport(r *bufio.Reader) []string {
+	// The line menu can't intercept Tab, so surface the candidates instead:
+	// archives from the common locations are listed above the prompt.
+	items := findArchives()
+	def := ""
+	if len(items) == 1 {
+		def = items[0].value // one archive around — Enter takes it
+	}
+	if len(items) > 0 {
+		fmt.Println("archives found:")
+		for _, it := range items {
+			fmt.Printf("   %s  (%s)\n", it.value, it.note)
+		}
+	}
+	path := promptLine(r, "archive path (.dvca)", def)
+	if path == "" {
+		fmt.Println("no archive path given.")
+		return nil
+	}
+	if promptBool(r, "also roll the engine back to it after import? (--apply)", false) {
+		return []string{"import", "--apply", path}
+	}
+	return []string{"import", path}
 }
 
 func guidedDoctor(r *bufio.Reader) []string {
@@ -220,29 +347,43 @@ func guidedDoctor(r *bufio.Reader) []string {
 	return argv
 }
 
+// guidedConfig shows the export-folder state, then offers to change or reset
+// it — the setting people actually reach for. Declining every prompt runs the
+// bare command, which lists all settings like before.
+func guidedConfig(r *bufio.Reader) []string {
+	if cur := exportFolderSetting(); cur != "" {
+		fmt.Printf("export folder: %s\n", displayDir(cur))
+		if !promptBool(r, "change the export folder?", false) {
+			if promptBool(r, "reset it to the default (exports/ in the current directory)?", false) {
+				return []string{"config", "unset", "export.folder"}
+			}
+			return []string{"config"}
+		}
+		dir := promptLine(r, "new export folder (an existing directory)", cur)
+		if dir == "" {
+			fmt.Println("no folder given.")
+			return nil
+		}
+		return []string{"config", "set", "export.folder", dir}
+	}
+	fmt.Println("export folder: not set (exports/ in the current directory)")
+	if !promptBool(r, "set a default export folder?", false) {
+		return []string{"config"}
+	}
+	dir := promptLine(r, "export folder (an existing directory)", "")
+	if dir == "" {
+		fmt.Println("no folder given.")
+		return nil
+	}
+	return []string{"config", "set", "export.folder", dir}
+}
+
 // pickSnapshot lists snapshots newest-first and resolves a number or an
 // ID/prefix. Empty input returns "" (cancel, or "live engine" when optional).
 func pickSnapshot(r *bufio.Reader, label string, optional bool) string {
-	id, err := store.Open(storePath)
-	if err != nil {
-		fmt.Printf("cannot open store: %v\n", err)
+	rows := listSnapshots(label)
+	if rows == nil {
 		return ""
-	}
-	rows, err := id.ListSnapshots()
-	id.Close()
-	if err != nil {
-		fmt.Printf("cannot list snapshots: %v\n", err)
-		return ""
-	}
-	if len(rows) == 0 {
-		fmt.Println("no snapshots yet — take one first (menu action 2).")
-		return ""
-	}
-	fmt.Printf("%s\n", label)
-	for i := len(rows) - 1; i >= 0; i-- { // newest first, matching `log`
-		row := rows[i]
-		fmt.Printf("  %2d) %-26s %s  %s\n", len(rows)-i, row.ID,
-			row.CreatedAt.Local().Format("2006-01-02 15:04"), row.Message)
 	}
 	hint := "number or snapshot id"
 	if optional {
@@ -260,6 +401,68 @@ func pickSnapshot(r *bufio.Reader, label string, optional bool) string {
 		return ""
 	}
 	return ans
+}
+
+// pickSnapshots resolves one or more picks — numbers or ids, comma- or
+// space-separated, duplicates collapsed. Empty input returns nil (cancel).
+func pickSnapshots(r *bufio.Reader, label string) []string {
+	rows := listSnapshots(label)
+	if rows == nil {
+		return nil
+	}
+	newest := make([]string, len(rows)) // display order: newest is row 1
+	for i := range rows {
+		newest[len(rows)-1-i] = rows[i].ID
+	}
+	ans := promptLine(r, "number(s) or snapshot id(s), comma-separated", "")
+	if ans == "" {
+		return nil
+	}
+	var ids []string
+	seen := map[string]bool{}
+	for _, tok := range strings.FieldsFunc(ans, func(c rune) bool {
+		return c == ',' || c == ' ' || c == '\t'
+	}) {
+		if n, err := strconv.Atoi(tok); err == nil {
+			if n < 1 || n > len(rows) {
+				fmt.Printf("%d is out of range (1–%d)\n", n, len(rows))
+				return nil
+			}
+			tok = newest[n-1]
+		}
+		if !seen[tok] {
+			seen[tok] = true
+			ids = append(ids, tok)
+		}
+	}
+	return ids
+}
+
+// listSnapshots prints the newest-first pick list under label and returns the
+// rows oldest-first; nil when the store is unreadable or empty.
+func listSnapshots(label string) []store.SnapshotRow {
+	s, err := store.Open(storePath)
+	if err != nil {
+		fmt.Printf("cannot open store: %v\n", err)
+		return nil
+	}
+	rows, err := s.ListSnapshots()
+	s.Close()
+	if err != nil {
+		fmt.Printf("cannot list snapshots: %v\n", err)
+		return nil
+	}
+	if len(rows) == 0 {
+		fmt.Println("no snapshots yet — take one first (menu action 2).")
+		return nil
+	}
+	fmt.Printf("%s\n", label)
+	for i := len(rows) - 1; i >= 0; i-- { // newest first, matching `log`
+		row := rows[i]
+		fmt.Printf("  %2d) %-26s %s  %s\n", len(rows)-i, row.ID,
+			row.CreatedAt.Local().Format("2006-01-02 15:04"), row.Message)
+	}
+	return rows
 }
 
 // ── small prompt helpers ─────────────────────────────────────────────────────

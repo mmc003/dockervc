@@ -1,5 +1,5 @@
 # Bump VERSION on every change that ships: patch = fixes, minor = features.
-VERSION ?= 0.4.3
+VERSION ?= 0.5.0
 LDFLAGS := -s -w -X dockervc/internal/cli.Version=$(VERSION)
 
 # The per-platform dist targets are directories that exist after the first

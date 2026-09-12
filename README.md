@@ -69,9 +69,41 @@ dockervc status                   # what changed since the last snapshot?
 dockervc doctor                   # instant health check (missing files, broken snapshots)
 dockervc doctor --deep            # also re-hash every object (catches corruption)
 dockervc doctor --repair          # interactively fix what it finds
-dockervc delete snap-...          # drop a snapshot
+dockervc delete snap-... [snap-...]  # drop one or more snapshots
 dockervc prune                    # reclaim storage from unreferenced objects
 ```
+
+Restore a snapshot (fully or in part):
+
+```sh
+dockervc rollback snap-... --dry-run     # print the restore plan, change nothing
+dockervc rollback snap-... --all         # restore everything it captured
+dockervc rollback snap-... --volumes demo-data   # just some volumes (or --containers/--images/--networks)
+```
+
+A rollback stops and removes same-named containers, replaces volume contents
+exactly (files created after the snapshot don't survive), recreates containers
+from their recorded config and starts the ones that were running — existing
+networks and images are reused, never deleted. Unless `--keep-current`, a
+pre-rollback checkpoint snapshot is taken first, so the rollback itself can be
+rolled back. Broken snapshots (missing object files) are refused outright.
+
+Move a snapshot to another machine (or off-site path) as one portable file:
+
+```sh
+dockervc export snap-...                  # writes exports/<snapshot-id>.dvca (folder created on demand)
+dockervc export --latest -o /path/state.dvca
+dockervc config set export.folder ~/backups   # default folder for exports (menus and bare command)
+dockervc config unset export.folder           # back to exports/ in the current directory
+dockervc import state.dvca                # verify + add to this machine's store
+dockervc import state.dvca --apply        # ... then roll this engine back to it (asks once)
+```
+
+The `.dvca` file is an uncompressed tar holding the manifest, every object
+verbatim, and a GNU `sha256sum`-style checksums file — after `tar xf` you can
+verify it with plain `shasum -a 256 -c checksums.sha256`, no dockervc needed.
+Import re-hashes every object while streaming it in; a tampered or truncated
+archive is rejected by name, and re-importing the same snapshot is a no-op.
 
 Useful snapshot flags:
 
@@ -129,11 +161,11 @@ many snapshots — repeated snapshots are cheap.
 | Snapshots (containers, images, volumes, networks) | ✅ working |
 | History, inspection, drift status, diff | ✅ working |
 | Integrity verification, prune/GC | ✅ working |
-| Rollback (full engine / granular entities) | 🚧 Step 3 — stub command registered |
-| Export to portable archive / import on another machine | 🚧 Step 4 — stub commands registered |
+| Rollback (full engine / granular entities) | ✅ working |
+| Export to portable archive / import on another machine | ✅ working |
 
 ## Design
 
 See [DESIGN.md](DESIGN.md) for the full architecture: content-addressed
-storage, SQLite catalog, snapshot data model, and the planned rollback and
-export/import formats.
+storage, SQLite catalog, snapshot data model, and rollback semantics; the
+export/import format (Step 4) is specified there too.

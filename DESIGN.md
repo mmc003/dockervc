@@ -1,8 +1,8 @@
 # dockervc — Local Version Control & Backup for Docker
 
-**Status:** Steps 1–2 complete (snapshot engine, CAS store, TUI, volume file
-indexes). Step 3 (rollback) and Step 4 (export/import) are specified but not
-implemented — **see [HANDOFF.md](HANDOFF.md) for the implementation brief**;
+**Status:** Steps 1–3 complete (snapshot engine, CAS store, TUI, volume file
+indexes, rollback). Step 4 (export/import) is specified but not implemented —
+**see [HANDOFF.md](HANDOFF.md) for the implementation brief**;
 this document is the architecture intent, HANDOFF.md is ground truth for what
 exists in code today.
 **Target:** Windows, Linux and macOS hosts; 100% local operation, no cloud
@@ -187,13 +187,19 @@ reversible.
 state.dvca                        # uncompressed outer tar (the blobs inside are
 │                                 #   already zstd — double compression buys nothing)
 ├── manifest.json                 # the snapshot's model.Manifest JSON, verbatim
-├── checksums.sha256              # "sha256 <hash>  objects/<hash>" per object
-│                                 #   + "sha256 <hash>  manifest.json"
+├── checksums.sha256              # GNU sha256sum lines: "<hash>  objects/<hash>"
+│                                 #   per object + "<hash>  manifest.json" — a
+│                                 #   plain `shasum -a 256 -c` can verify an
+│                                 #   unpacked archive with no dockervc present
 └── objects/<hash>                # the CAS blobs this snapshot references,
                                   #   stored bytes verbatim (zstd-compressed)
 ```
 
-Import re-hashes every object, adopts them into the local CAS, and registers
+`export snap-…` writes `exports/<snapshot-id>.dvca` when `-o` is omitted
+(or the `export.folder` setting's target — `dockervc config set/unset`); import
+re-hashes every object while streaming it, adopts the bytes verbatim into the
+local CAS (`store.AdoptObject` — never re-compressed, so hashes keep their
+identity across machines), and registers
 the snapshot — after which `rollback` works exactly as on the source machine.
 Machine-independence: no absolute paths in the manifest are load-bearing;
 engine-specific fields (engine id, container IDs) are recorded but never
@@ -207,8 +213,8 @@ required for restore. (Exact algorithms and edge cases: HANDOFF.md §5.)
 |---|---|---|
 | **2** | Core: Go module, `init`, `snapshot`, `log/show/diff/status`, CAS + SQLite catalog, `cli` TUI, `man`, volume file indexes | ✅ done |
 | **2b** | Health: `doctor` (structural + `--deep` content re-hash, `--repair` with per-step confirmation), broken markers in `log`; `verify` deprecated to alias | ✅ done |
-| **3** | Rollback: plan builder, full + granular apply, pre-rollback checkpoint (`internal/rollback`) | 🚧 specified — HANDOFF.md §4 |
-| **4** | Export/import: `.dvca` writer/reader, verification, `--apply` (`internal/portable`) | 🚧 specified — HANDOFF.md §5 |
+| **3** | Rollback: plan builder, full + granular apply, pre-rollback checkpoint (`internal/rollback`) | ✅ done — implementation notes at the end of HANDOFF.md §4 |
+| **4** | Export/import: `.dvca` writer/reader, verification, `--apply` (`internal/portable`) | ✅ done — no `drives` command (de-scoped by user decision; see EXPORT-PLAN.md amendment) |
 | **5** | `install.sh`, Makefile cross-compile (darwin/linux/windows × amd64/arm64), README | ✅ done (deb/rpm deferred) |
 
 **Safety properties throughout:** single-writer via file lock on the store; atomic object
