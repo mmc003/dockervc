@@ -14,10 +14,16 @@ compare, and (in the current roadmap) roll back and migrate them.
 
 ## Install
 
+Prebuilt packages live on the [Releases page](https://github.com/mmc003/dockervc/releases)
+(the `dist/` directory is build output and is not committed). Or build from
+source: `go build .` for the current platform, or `make dist` for all six
+platform packages.
+
 ### Windows (primary target)
 
-1. Download and extract the release `.zip` (pick `windows-amd64`, or
-   `windows-arm64` for ARM devices).
+1. Download and extract the release `.zip` from
+   [Releases](https://github.com/mmc003/dockervc/releases) (pick
+   `windows-amd64`, or `windows-arm64` for ARM devices).
 2. Open PowerShell **inside the extracted folder** and run:
 
    ```powershell
@@ -33,8 +39,9 @@ compare, and (in the current roadmap) roll back and migrate them.
 
 ### Linux / macOS
 
-Pick the archive matching your OS and CPU (`uname -m` prints `x86_64` →
-amd64, `aarch64`/`arm64` → arm64):
+Download the archive matching your OS and CPU from
+[Releases](https://github.com/mmc003/dockervc/releases) (`uname -m` prints
+`x86_64` → amd64, `aarch64`/`arm64` → arm64), then:
 
 ```sh
 tar xzf dockervc-<version>-<os>-<arch>.tar.gz
