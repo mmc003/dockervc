@@ -34,6 +34,21 @@ sudo ./install.sh          # or: ./install.sh --prefix ~/bin
 > On an Intel Mac or a Linux box, build from source instead — `go build .`
 > produces a binary for the machine you're on.
 
+### Uninstall
+
+Run the uninstaller from the same extracted release folder (or grab
+`packaging/uninstall.sh` from the repo — it needs nothing next to it):
+
+```sh
+sudo ./uninstall.sh          # or: ./uninstall.sh --prefix ~/bin
+```
+
+It removes the `dockervc` executable(s) it finds — every copy on `PATH`,
+plus the `/usr/local/bin` default — and prints where your snapshot store
+lives (`~/.dockervc`, `/var/lib/dockervc`, or `$DOCKERVC_HOME`). The store
+itself is left alone: it holds your snapshots, so deleting it stays a
+decision you make by hand with `rm -rf`.
+
 ## Quick start
 
 Don't want to memorize commands? Run `dockervc cli` for an interactive menu

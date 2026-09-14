@@ -4,6 +4,20 @@ User-facing changes per version. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions match the
 [GitHub releases](https://github.com/mmc003/dockervc/releases).
 
+## v0.5.1 — 2026-09-14
+
+### Uninstaller
+
+- Release tarballs now ship `uninstall.sh` next to `install.sh` (also in
+  `packaging/`; it runs from anywhere). It removes the `dockervc`
+  executable(s) — every copy found on `PATH` plus the `/usr/local/bin`
+  default, or just a `--prefix` install — asking you to re-run with `sudo`
+  when a binary needs root to remove.
+- The snapshot store is intentionally kept: snapshots are your data, so the
+  script instead prints each store it finds (`$DOCKERVC_HOME`,
+  `/var/lib/dockervc`, `~/.dockervc` — the invoking user's home too, when
+  run under `sudo`), its size, and the exact `rm -rf` to run by hand.
+
 ## v0.5.0 — 2026-09-12
 
 Everything since v0.4.3. Headlines: snapshots can now be **rolled back**,

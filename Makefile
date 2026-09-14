@@ -1,5 +1,5 @@
 # Bump VERSION on every change that ships: patch = fixes, minor = features.
-VERSION ?= 0.5.0
+VERSION ?= 0.5.1
 LDFLAGS := -s -w -X dockervc/internal/cli.Version=$(VERSION)
 
 # The per-platform dist targets are directories that exist after the first
@@ -24,8 +24,8 @@ dist/darwin-arm64:
 
 # Tar.gz packaging.
 define package_unix
-	cp packaging/install.sh README.md dist/$(1)/
-	chmod +x dist/$(1)/install.sh
+	cp packaging/install.sh packaging/uninstall.sh README.md dist/$(1)/
+	chmod +x dist/$(1)/install.sh dist/$(1)/uninstall.sh
 	cd dist && tar czf dockervc-$(VERSION)-$(1).tar.gz $(1)
 endef
 
