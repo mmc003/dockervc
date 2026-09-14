@@ -5,10 +5,12 @@ LDFLAGS := -s -w -X dockervc/internal/cli.Version=$(VERSION)
 # The per-platform dist targets are directories that exist after the first
 # run; without .PHONY, make would treat them as up to date and package stale
 # binaries on later builds.
-.PHONY: all build test clean dist dist-windows dist-linux dist-macos \
-	dist/windows-amd64 dist/windows-arm64 \
-	dist/linux-amd64 dist/linux-arm64 \
-	dist/darwin-amd64 dist/darwin-arm64
+#
+# Supported release platforms: Apple-silicon macOS (darwin-arm64) and x64
+# Windows (windows-amd64). Other platforms build from source with
+# `go build .` (Go cross-compiles).
+.PHONY: all build test clean dist \
+	dist/windows-amd64 dist/darwin-arm64
 
 all: build
 
@@ -22,18 +24,6 @@ test:
 dist/windows-amd64:
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o dist/windows-amd64/dockervc.exe .
 
-dist/windows-arm64:
-	CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o dist/windows-arm64/dockervc.exe .
-
-dist/linux-amd64:
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o dist/linux-amd64/dockervc .
-
-dist/linux-arm64:
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o dist/linux-arm64/dockervc .
-
-dist/darwin-amd64:
-	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o dist/darwin-amd64/dockervc .
-
 dist/darwin-arm64:
 	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o dist/darwin-arm64/dockervc .
 
@@ -44,19 +34,12 @@ define package_unix
 	cd dist && tar czf dockervc-$(VERSION)-$(1).tar.gz $(1)
 endef
 
-dist-macos: dist/darwin-amd64 dist/darwin-arm64
-	$(call package_unix,darwin-amd64)
+dist: dist/darwin-arm64 dist/windows-amd64
+	# macOS package: tar.gz with installer + README
 	$(call package_unix,darwin-arm64)
-
-dist: dist/windows-amd64 dist/windows-arm64 dist/linux-amd64 dist/linux-arm64 dist-macos
-	# Windows packages: zip with installer + README
+	# Windows package: zip with installer + README
 	cp packaging/install.ps1 README.md dist/windows-amd64/
-	cp packaging/install.ps1 README.md dist/windows-arm64/
-	cd dist && zip -q -r dockervc-$(VERSION)-windows-amd64.zip windows-amd64 \
-		&& zip -q -r dockervc-$(VERSION)-windows-arm64.zip windows-arm64
-	# Linux packages: tar.gz with installer + README
-	$(call package_unix,linux-amd64)
-	$(call package_unix,linux-arm64)
+	cd dist && zip -q -r dockervc-$(VERSION)-windows-amd64.zip windows-amd64
 	@echo "Packages in dist/:"
 	@ls -lh dist/*.zip dist/*.tar.gz
 

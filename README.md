@@ -15,15 +15,15 @@ compare, and (in the current roadmap) roll back and migrate them.
 ## Install
 
 Prebuilt packages live on the [Releases page](https://github.com/mmc003/dockervc/releases)
-(the `dist/` directory is build output and is not committed). Or build from
-source: `go build .` for the current platform, or `make dist` for all six
-platform packages.
+for Apple-silicon macOS (`darwin-arm64`) and x64 Windows (`windows-amd64`) —
+the two supported platforms (the `dist/` directory is build output and is
+not committed). Anything else builds from source: `go build .` for the
+current platform; Go cross-compiles too.
 
 ### Windows (primary target)
 
 1. Download and extract the release `.zip` from
-   [Releases](https://github.com/mmc003/dockervc/releases) (pick
-   `windows-amd64`, or `windows-arm64` for ARM devices).
+   [Releases](https://github.com/mmc003/dockervc/releases) (`windows-amd64`).
 2. Open PowerShell **inside the extracted folder** and run:
 
    ```powershell
@@ -37,17 +37,19 @@ platform packages.
 > reached over its named pipe — nothing to configure, `dockervc` finds it
 > automatically (standard `DOCKER_HOST` overrides work too).
 
-### Linux / macOS
+### macOS (Apple silicon)
 
-Download the archive matching your OS and CPU from
-[Releases](https://github.com/mmc003/dockervc/releases) (`uname -m` prints
-`x86_64` → amd64, `aarch64`/`arm64` → arm64), then:
+Download the `darwin-arm64` archive from
+[Releases](https://github.com/mmc003/dockervc/releases), then:
 
 ```sh
-tar xzf dockervc-<version>-<os>-<arch>.tar.gz
-cd <os>-<arch>             # e.g. linux-amd64, darwin-arm64
+tar xzf dockervc-<version>-darwin-arm64.tar.gz
+cd darwin-arm64
 sudo ./install.sh          # or: ./install.sh --prefix ~/bin
 ```
+
+> On an Intel Mac or a Linux box, build from source instead — `go build .`
+> produces a binary for the machine you're on.
 
 ## Quick start
 
