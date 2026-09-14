@@ -24,7 +24,8 @@ Every feature that works on darwin-arm64 works the same way on windows-amd64:
   (+`--deep`/`--repair`), `config` (get/set/unset), `man`, `version`
 - the **full-screen TUI** runs in Windows Terminal (not just the line menu)
 - Tab completion works for snapshot ids **and Windows paths** (`C:\…`)
-- archives exported on Windows import cleanly on a mac and vice versa
+- archives exported on Windows import cleanly back into Windows (a
+  second, fresh store) — mac interchange is explicitly **out of scope**
 - `install.ps1` end-to-end install → PATH → everything above passes
 - the full `go test ./...` suite passes **on Windows** (it already runs
   cross-platform; see §4.3)
@@ -280,10 +281,11 @@ live on Windows:
 - **Docker transport.** `client.FromEnv` only — defaults to
   `npipe:////./pipe/docker_engine` on Windows; `DOCKER_HOST` honored.
   Nothing to write; verify against a running Docker Desktop.
-- **Archive byte-parity.** `.dvca` tar entry names are forward-slash string
-  concatenation (`objectsPrefix + hash`), never `filepath.Join` — so a
-  Windows-built archive is structurally identical to a mac's. Never
-  regress this; §9 item 5 is the proof.
+- **Archive paths.** `.dvca` tar entry names are forward-slash string
+  concatenation (`objectsPrefix + hash`), never `filepath.Join`. Mac
+  interchange is out of scope (§0), but never regress this anyway — it
+  is already how the cross-platform code works, and it keeps the archive
+  layout deterministic. §9 item 5 proves the Windows round-trip.
 - **Restore tags.** Containers restore under deterministic tags
   `<name>-restored-from-<snapID>` — no Windows angle, but they appear in
   every rollback verification.
@@ -326,12 +328,13 @@ the §8 engine.
    `rollback <snap> --all --dry-run` → apply → volume byte-restored,
    demo-web recreated; granular `--volumes demo-data` touches nothing else;
    `--keep-current` skips the checkpoint; re-run → skips (idempotent)
-5. **Export/import cross-platform (the parity keystone):** `export` to a
-   `C:\`-nested `-o` path → get the `.dvca` to the maintainer's mac
-   (ask the user) and have it imported there; then the reverse direction
-   (mac-exported archive → Windows `import`, then `import --apply`).
-   Tamper one byte in a copy → import must reject atomically; re-import →
-   verified no-op
+5. **Export/import round-trip (the parity keystone):** `export` to a
+   `C:\`-nested `-o` path → point `DOCKERVC_HOME` at a second, fresh
+   store, `init` it, and `import` the archive there → `import --apply`
+   restores the containers/volumes into that store. Tamper one byte in a
+   copy → import must reject atomically; re-import the good archive →
+   verified no-op. Mac interchange is out of scope — Windows-to-Windows
+   only
 6. **Health:** `doctor` clean, `--deep`; move one object file aside →
    broken marker in `log` → `doctor --repair` flow
 7. **Maintenance:** multi-`delete`, `prune` reclaim count
