@@ -314,3 +314,22 @@ func stepList(steps []Step) string {
 	}
 	return sb.String()
 }
+
+func TestRestoreTag(t *testing.T) {
+	// The tag is what `docker images` shows for a restored container
+	// filesystem — it must read as "<name>-restored-from-<snapshot>" and
+	// stay a legal docker reference (lowercase, no spaces).
+	got := RestoreTag("snap-20260912-160108-9246", "Demo_Web.1")
+	want := "demo_web.1-restored-from-snap-20260912-160108-9246"
+	if got != want {
+		t.Fatalf("RestoreTag = %q, want %q", got, want)
+	}
+	// names docker would reject (spaces, capitals, slashes) are scrubbed
+	if g := RestoreTag("snap-x", "My App/v2"); g != "my-app-v2-restored-from-snap-x" {
+		t.Fatalf("scrubbing: got %q", g)
+	}
+	// same container + snapshot always maps to the same tag (re-run skip)
+	if RestoreTag("snap-x", "demo-web") != RestoreTag("snap-x", "demo-web") {
+		t.Fatal("RestoreTag must be deterministic")
+	}
+}

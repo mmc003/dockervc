@@ -172,7 +172,7 @@ already-present small image like busybox/alpine).
 >   daemon's own `Loaded image ID:` line. Quiet would suppress the only
 >   reliable source.
 > - **No in-memory hash→image-ID map.** Committed filesystems are loaded under
->   a deterministic restore tag `dockervc/restore/<snapID>/<name>` and
+>   a deterministic restore tag `<name>-restored-from-<snapID>` and
 >   containers are created against that tag — the engine itself is the map, and
 >   re-runs after partial failure skip already-loaded filesystems.
 > - **Plan carries skip steps and drift warnings**: images already present /

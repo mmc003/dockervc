@@ -27,7 +27,7 @@ type Executor struct {
 // caller to print.
 func (e *Executor) Apply(ctx context.Context, p *Plan) error {
 	// Containers are created under their deterministic restore tag
-	// (dockervc/restore/<snap>/<name>), so the hash→image binding lives in
+	// (<name>-restored-from-<snap>), so the hash→image binding lives in
 	// the engine itself — no in-memory ID map to keep coherent.
 	containerIDs := map[string]string{} // container name → newly created ID
 

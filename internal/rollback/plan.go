@@ -292,10 +292,12 @@ func (ls *LiveState) HasTag(ref string) bool {
 }
 
 // RestoreTag is the deterministic tag under which a container's restored
-// filesystem is loaded — mirrors capture's dockervc/snap/<id>/<name> tagging
-// and makes partial-failure re-runs skip already-loaded images.
+// filesystem is loaded. It reads in `docker images` / `docker ps` as
+// "<name>-restored-from-<snapshot>" (docker refs allow no spaces, so dashes
+// stand in), and its determinism is what makes partial-failure re-runs skip
+// already-loaded filesystems.
 func RestoreTag(snapshotID, containerName string) string {
-	return "dockervc/restore/" + snapshotID + "/" + sanitize(containerName)
+	return sanitize(containerName) + "-restored-from-" + snapshotID
 }
 
 // sanitize matches capture's container-name scrubbing so snap and restore

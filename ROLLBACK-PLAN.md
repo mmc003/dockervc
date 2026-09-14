@@ -106,9 +106,9 @@ Content (`VolumeRestore`), mirroring `VolumeTarStream` in stream.go:
 - Skip-if-present: `ImageRecord`s compare `rec.Digest` against live
   `image.Summary.ID` + `RepoDigests` (capture's dedup key, capture.go:379).
 - Container `ImageObject`s (committed images have no repo digest): after each
-  load, tag deterministically `dockervc/restore/<snapID>/<sanitized-name>`
-  (mirrors capture's `dockervc/snap/<id>/<name>`); skip the load when the tag
-  already exists in ImageList. Makes partial-failure re-runs cheap.
+  load, tag deterministically `<sanitized-name>-restored-from-<snapID>`;
+  skip the load when the tag already exists in ImageList. Makes
+  partial-failure re-runs cheap.
 - After loading an ImageRecord object, re-apply recorded tags via `ImageTag`.
 - Keep `map[hash]imageID` so container steps reference loaded images without
   re-loading.
@@ -199,7 +199,7 @@ entities **plus implicit dependencies** — selecting containers pulls in their
 type Executor struct { Cli *dockerapi.Client; St *store.Store; Out io.Writer }
 func (e *Executor) Apply(ctx context.Context, p *Plan) error
 // sequential; prints each step as it completes (TUI captures stdout);
-// maintains map[objectHash]imageID and dockervc/restore/<snap>/<name> tags;
+// maintains map[objectHash]imageID and <name>-restored-from-<snap> tags;
 // fail-fast; summary error lists completed vs failed counts.
 ```
 
