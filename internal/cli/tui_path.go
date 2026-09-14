@@ -1,14 +1,15 @@
 // Filesystem path Tab-completion for the TUI: the ':' command line (import's
 // archive argument, export's -o/--output value) and the export/import path
 // dialogs. A token completes against the directory holding its final path
-// component; directories come back with a trailing "/" so completion can
-// keep walking into them, like a shell.
+// component; directories come back with a trailing separator so completion
+// can keep walking into them, like a shell.
 package cli
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -34,7 +35,8 @@ func pathMatches(tok string) []string {
 		}
 		suffix := ""
 		if e.IsDir() {
-			suffix = "/" // keep completion walking into the directory
+			// the OS separator, so what lands in the input line is consistent
+			suffix = string(filepath.Separator)
 		}
 		out = append(out, filepath.Join(dir, name)+suffix)
 	}
@@ -42,20 +44,52 @@ func pathMatches(tok string) []string {
 	return out
 }
 
+// pathSeps is the byte set that ends a path component for completion: "/"
+// everywhere, plus "\" on Windows, where it is the native separator (on Unix
+// a backslash is a legal filename character and must not split anything).
+func pathSeps() string {
+	if runtime.GOOS == "windows" {
+		return `/\`
+	}
+	return "/"
+}
+
 // splitPathToken splits a completion token into its directory and the last
 // path component being typed ("a/b/c" → "a/b", "c"; "c" → ".", "c"). A
 // leading "~" expands to the home directory so ~/… completes like a shell.
 func splitPathToken(tok string) (dir, prefix string) {
+	return splitPathSep(tok, pathSeps())
+}
+
+// splitPathSep is splitPathToken with the separator set injected, so the
+// backslash behavior is unit-testable on every platform.
+func splitPathSep(tok, seps string) (dir, prefix string) {
 	tok = expandHome(tok)
-	i := strings.LastIndexByte(tok, '/')
-	switch i {
-	case -1:
+	windows := strings.Contains(seps, `\`)
+	i := strings.LastIndexAny(tok, seps)
+	switch {
+	case i == -1:
+		// "C:" alone means "current directory of drive C" to Windows APIs;
+		// a completer means the drive root, so list that.
+		if windows && isDrive(tok) {
+			return tok + `\`, ""
+		}
 		return ".", tok
-	case 0:
-		return "/", tok[1:]
+	case i == 0:
+		return tok[:1], tok[1:] // "/" (or "\") root
 	default:
-		return tok[:i], tok[i+1:]
+		dir := tok[:i]
+		if windows && isDrive(dir) { // "C:\Users" → directory "C:\"
+			dir += `\`
+		}
+		return dir, tok[i+1:]
 	}
+}
+
+// isDrive reports whether s is a bare drive reference like "C:".
+func isDrive(s string) bool {
+	return len(s) == 2 && s[1] == ':' &&
+		(s[0] >= 'a' && s[0] <= 'z' || s[0] >= 'A' && s[0] <= 'Z')
 }
 
 // lcp is the longest common prefix of the strings.

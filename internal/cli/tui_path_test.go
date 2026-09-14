@@ -46,18 +46,19 @@ func TestPathMatches(t *testing.T) {
 	if len(ms) != 1 || ms[0] != join("beta.dvca")[0] {
 		t.Fatalf("beta prefix: got %v", ms)
 	}
-	// listing a directory: trailing slash keeps completion walking into it
-	if ms := pathMatches(filepath.Join(dir, "s")); len(ms) != 1 || !strings.HasSuffix(ms[0], "sub/") {
-		t.Fatalf("dir match must end with '/': got %v", ms)
+	// listing a directory: trailing separator keeps completion walking into it
+	if ms := pathMatches(filepath.Join(dir, "s")); len(ms) != 1 ||
+		!strings.HasSuffix(ms[0], "sub"+string(filepath.Separator)) {
+		t.Fatalf("dir match must end with the OS separator: got %v", ms)
 	}
-	// a trailing slash lists the directory (dotfiles only on '.'+prefix);
-	// built by concat because filepath.Join would strip the slash.
-	all := pathMatches(dir + "/")
+	// a trailing separator lists the directory (dotfiles only on '.'+prefix);
+	// built by concat because filepath.Join would strip it.
+	all := pathMatches(dir + string(filepath.Separator))
 	if len(all) != 4 { // alpha.dvca, beta.dvca, .hidden, sub/
 		t.Fatalf("dir listing: got %v", all)
 	}
 	// raw concat — filepath.Join would collapse the trailing "/."
-	if ms := pathMatches(dir + "/."); len(ms) != 1 || !strings.HasSuffix(ms[0], ".hidden") {
+	if ms := pathMatches(dir + string(filepath.Separator) + "."); len(ms) != 1 || !strings.HasSuffix(ms[0], ".hidden") {
 		t.Fatalf("dot prefix must match dotfiles: got %v", ms)
 	}
 	if ms := pathMatches(filepath.Join(dir, "zzz")); ms != nil {
@@ -65,6 +66,38 @@ func TestPathMatches(t *testing.T) {
 	}
 	if ms := pathMatches(filepath.Join(dir, "no-such-dir", "x")); ms != nil {
 		t.Fatalf("unreadable dir: got %v", ms)
+	}
+}
+
+// TestSplitPathSep locks the split behavior for both separator styles. The
+// backslash cases run on every platform via the injected separator set —
+// that is how Windows path completion behaves on Windows.
+func TestSplitPathSep(t *testing.T) {
+	unix := []struct{ tok, dir, prefix string }{
+		{"a/b/c", "a/b", "c"},
+		{"c", ".", "c"},
+		{"/x", "/", "x"},
+		{"/", "/", ""},
+		{`a\b`, ".", `a\b`}, // backslash is a plain filename char on Unix
+	}
+	for _, c := range unix {
+		if dir, prefix := splitPathSep(c.tok, "/"); dir != c.dir || prefix != c.prefix {
+			t.Fatalf("unix split(%q) = %q, %q; want %q, %q", c.tok, dir, prefix, c.dir, c.prefix)
+		}
+	}
+
+	win := []struct{ tok, dir, prefix string }{
+		{`C:\Users\me\Des`, `C:\Users\me`, "Des"}, // native style
+		{`C:\`, `C:\`, ""},                        // drive root lists itself
+		{"C:", `C:\`, ""},                         // bare drive → its root
+		{"C:/Users", `C:\`, "Users"},              // forward slashes still split
+		{`a\b`, "a", "b"},                         // relative backslash path
+		{"b", ".", "b"},
+	}
+	for _, c := range win {
+		if dir, prefix := splitPathSep(c.tok, `/\`); dir != c.dir || prefix != c.prefix {
+			t.Fatalf("windows split(%q) = %q, %q; want %q, %q", c.tok, dir, prefix, c.dir, c.prefix)
+		}
 	}
 }
 
@@ -128,7 +161,7 @@ func TestColonModePathCompletion(t *testing.T) {
 	}
 
 	// candidates render with a path header
-	tt.input = "import " + dir + "/"
+	tt.input = "import " + dir + string(filepath.Separator)
 	tt.updateCompletions()
 	rows := tt.candidateLines(10)
 	if len(rows) == 0 || !strings.Contains(rows[0][0].(string), "path match") {
@@ -157,7 +190,7 @@ func TestDefaultExportPath(t *testing.T) {
 
 func TestFindArchives(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeEnv(t, home)
 	seedStore(t, 1)
 	dl := filepath.Join(home, "Downloads")
 	if err := os.Mkdir(dl, 0o755); err != nil {
@@ -196,7 +229,10 @@ func TestFindArchives(t *testing.T) {
 	if items[0].value != newest || items[1].value != newB || items[2].value != oldA {
 		t.Fatalf("newest first: got %v", items)
 	}
-	if !strings.Contains(items[2].note, "~/Downloads") || !strings.Contains(items[2].note, "5 B") {
+	// "~" + the OS separator: displayDir shortens with filepath.Separator,
+	// so the note reads ~/Downloads on Unix and ~\Downloads on Windows.
+	wantLoc := "~" + string(filepath.Separator) + "Downloads"
+	if !strings.Contains(items[2].note, wantLoc) || !strings.Contains(items[2].note, "5 B") {
 		t.Fatalf("note should carry size and ~-shortened location, got %q", items[2].note)
 	}
 }
@@ -228,9 +264,17 @@ func mustChtime(t *testing.T, path string, tm time.Time) {
 	}
 }
 
+// setHomeEnv points os.UserHomeDir at dir on every platform: HOME is what
+// Unix reads, USERPROFILE what Windows reads (setting both is harmless).
+func setHomeEnv(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
+}
+
 func TestAskImportArchiveFlow(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHomeEnv(t, home)
 	dl := filepath.Join(home, "Downloads")
 	if err := os.Mkdir(dl, 0o755); err != nil {
 		t.Fatal(err)
