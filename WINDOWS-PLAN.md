@@ -2,11 +2,9 @@
 
 > **What this is:** a self-contained implementation brief. You are a coding
 > agent on a Windows 10 22H2+/11 **amd64** machine with Docker Desktop, Go
-> 1.26+ and git, sitting in a **local offline copy of the dockervc
-> repository** (`.git` included, full history). No GitHub access is needed
-> or expected on this machine. Read all of it before writing code, then work
-> top to bottom. Everything you need is here or in the files it points at
-> inside this repository.
+> 1.26+ and git, in a fresh directory that contains only this file. Read all
+> of it before writing code, then work top to bottom. Everything you need is
+> here or in the files it points at inside the repository you will clone.
 >
 > **Background:** dockervc is a released, working tool on Apple-silicon macOS
 > — `darwin-arm64` is the reference platform. A first Windows port shipped in
@@ -36,11 +34,8 @@ deliverables exist. Anything you could not test, say so plainly.
 
 ## 1. Ground rules
 
-- **Work on a branch.** First thing: `git checkout -b windows-port`. Commit
-  early and often; never touch `main`. **Never push, pull, or fetch** — the
-  `origin` remote exists in the config but has no credentials on this
-  machine; all transport to and from the maintainer happens by copying the
-  repository directory (§10).
+- **Work on a branch.** After cloning: `git checkout -b windows-port`. Commit
+  early and often; never touch `main`; push the branch when finished.
 - **Commit messages** end with:
   `Co-Authored-By: Claude Code <noreply@anthropic.com>`
 - **Never mutate a real store.** Anything live runs against a throwaway
@@ -66,16 +61,11 @@ deliverables exist. Anything you could not test, say so plainly.
 ## 2. Set up (Go + git is the whole toolchain — there is no make on Windows)
 
 ```powershell
-cd <wherever the repo copy lives>   # this file sits in the repository root
-git status        # expect: on main, tracked files clean; ignore stray untracked files
+git clone https://github.com/mmc003/dockervc.git   # private — ask the user if auth fails
+cd dockervc
 git checkout -b windows-port
 go vet ./...     # FAILS right now — on purpose; §3 explains
 ```
-
-No clone, no network: this is an offline copy of the repository with its
-full git history. `origin` still points at GitHub in the config — never
-contact it. If you ever genuinely need something from the remote, stop and
-ask the maintainer instead.
 
 Dev-loop mapping:
 
@@ -360,14 +350,13 @@ the §8 engine.
 
 ## 10. Deliverables and hand-back
 
-1. Branch `windows-port` committed locally — not pushed (§1) — with code
-   for §4–§6 (+ anything §9 surfaced), tests included
+1. Branch `windows-port` pushed, with code for §4–§6 (+ anything §9
+   surfaced), tests included
 2. Windows-side `go vet ./... && go test ./...` green
 3. `WINDOWSREPORT.md` in the repo root: per-feature verdict table, findings
    register (severity + fix status), the §9 matrix with actual results, and
    a plain statement of what was **not** tested
-4. Hand back to the maintainer (the user): they carry the repository copy
-   home, merge `windows-port` to main, then cut
+4. Hand back to the maintainer (the user): they merge to main, then cut
    **v0.6.0** from the mac — `make dist` (which by then packages both
    platforms again), tag, GitHub release — on their explicit approval only
 
