@@ -1,18 +1,18 @@
-# WINDOWS-PLAN.md — Windows amd64 full-implementation brief
+# WINDOWS-PLAN.md — build windows-amd64 support for dockervc from scratch
 
-> **What this is:** a self-contained prompt/brief for making the
-> `windows-amd64` build of dockervc **functionally identical to the
-> `darwin-arm64` build**, which is the reference platform (fully live-tested).
-> Hand it to an agent or engineer who has a Windows 10 22H2+/11 **amd64**
-> machine with Docker Desktop. Everything needed to do the work is in this
-> document or the files it points at.
+> **What this is:** a self-contained implementation brief. You are a coding
+> agent on a Windows 10 22H2+/11 **amd64** machine with Docker Desktop, Go
+> 1.26+ and git, in a fresh directory that contains only this file. Read all
+> of it before writing code, then work top to bottom. Everything you need is
+> here or in the files it points at inside the repository you will clone.
 >
-> Baseline at time of writing: **v0.5.0** (tagged, released). The windows
-> packages cross-compile cleanly and passed a static audit (§3), but the
-> binary has **never been executed on Windows**. That is the gap this brief
-> closes.
-
----
+> **Background:** dockervc is a released, working tool on Apple-silicon macOS
+> — `darwin-arm64` is the reference platform. A first Windows port shipped in
+> v0.5.0 and turned out broken, so Windows support was **removed from the
+> repository entirely** (build files, installer, release packaging, all of
+> it). Your job is to build it back so `windows-amd64` is functionally
+> identical to the mac version — implementing each piece per the specs in
+> §4–§7 and proving parity with the matrix in §9.
 
 ## 0. Mission and definition of done
 
@@ -24,66 +24,275 @@ Every feature that works on darwin-arm64 works the same way on windows-amd64:
   (+`--deep`/`--repair`), `config` (get/set/unset), `man`, `version`
 - the **full-screen TUI** runs in Windows Terminal (not just the line menu)
 - Tab completion works for snapshot ids **and Windows paths** (`C:\…`)
-- archives exported on Windows import cleanly on darwin-arm64 and vice versa
+- archives exported on Windows import cleanly on a mac and vice versa
 - `install.ps1` end-to-end install → PATH → everything above passes
-- no regression on darwin/linux: `go vet ./... && go test ./...` green,
-  `make dist` still builds both release packages (darwin-arm64,
-  windows-amd64)
+- the full `go test ./...` suite passes **on Windows** (it already runs
+  cross-platform; see §4.3)
 
-## 1. Context to read first (in order)
+You are done when §9's matrix passes with real recorded output and §10's
+deliverables exist. Anything you could not test, say so plainly.
 
-1. `README.md` — user-facing behavior, install flows, store locations
-2. `DESIGN.md` — architecture: CAS store, SQLite catalog, snapshot model,
-   rollback semantics, `.dvca` archive format
-3. `HANDOFF.md` — ground truth for what exists in code (§4 rollback, §5
-   export/import)
-4. `CHANGELOG.md` — what v0.5.0 shipped
+## 1. Ground rules
 
-Key architecture facts that constrain the work:
+- **Work on a branch.** After cloning: `git checkout -b windows-port`. Commit
+  early and often; never touch `main`; push the branch when finished.
+- **Commit messages** end with:
+  `Co-Authored-By: Claude Code <noreply@anthropic.com>`
+- **Never mutate a real store.** Anything live runs against a throwaway
+  store: `$env:DOCKERVC_HOME = "$env:TEMP\dvctest"` (session-scoped). The
+  `--store <path>` flag exists for targeted cases.
+- **No binaries in git.** `dist/`, `dockervc.exe` are gitignored — never
+  commit them.
+- **No CGO, ever.** SQLite is `modernc.org/sqlite` (pure Go);
+  `CGO_ENABLED=0` static builds are load-bearing.
+- **No shelling out** to docker/tar/shasum — Docker access is the official
+> Go SDK (`github.com/docker/docker/client`), archives are in-process
+  libraries. Keep it that way.
+- **No new dependencies** unless truly unavoidable; `golang.org/x/sys` and
+  `golang.org/x/term` are already in go.mod and are exactly what you need.
+- **gofmt only files you author.** Some pre-existing files are deliberately
+  not gofmt-clean; leave them.
+- **Menus add prompts, not logic.** Interactive flows funnel into the real
+  cobra commands; do not fork behavior per-OS beyond what this brief says.
+- **Do not bump `Makefile` VERSION yourself.** Version bumps, tags and
+  releases are cut by the maintainer on the mac after merge (this work ships
+  as **v0.6.0** — platform support is a minor bump).
 
-- **Menus add prompts, not logic.** Every interactive flow funnels into the
-  real cobra commands (`runArgs`/`t.execTUI`). Do not fork behavior per-OS
-  beyond what this brief specifies.
-- **The store is single-writer** via a lock file (`internal/store/lock_*.go`).
-- **Everything is in-process**: no `exec.Command`, no shelling out to tar,
-  shasum, or docker CLI. Keep it that way.
-- Pure-Go dependencies only (`modernc.org/sqlite`, `klauspost/compress`
-  zstd) — `CGO_ENABLED=0` builds are load-bearing for cross-compilation.
+## 2. Set up (Go + git is the whole toolchain — there is no make on Windows)
 
-## 2. Environment prerequisites
+```powershell
+git clone https://github.com/mmc003/dockervc.git   # private — ask the user if auth fails
+cd dockervc
+git checkout -b windows-port
+go vet ./...     # FAILS right now — on purpose; §3 explains
+```
 
-- Windows 10 22H2 or Windows 11, amd64
-- Docker Desktop installed and **running** (Linux containers mode)
-- Go 1.26+ (`go version`), git, PowerShell 5.1+
-- Build: `go build .` on the Windows box, or test the shipped
-  `dist/dockervc-0.5.0-windows-amd64.zip` package first to reproduce the
-  pre-fix state
-- A real terminal for TUI work: **Windows Terminal** (VT-capable). Also keep
-  a legacy `conhost` (plain cmd.exe window) around for fallback testing.
+Dev-loop mapping:
 
-### 2.1 Dev loop on Windows (no make needed)
-
-The Makefile is the *mac* side of the workflow: `make dist` cross-compiles
-and packages releases (it shells out to tar/zip/chmod, so it only runs on
-the mac), and `make test` is a thin wrapper. Nothing in it is required on
-the Windows box — Go and git are the whole toolchain:
-
-| mac | Windows |
+| mac | Windows (you) |
 |---|---|
 | `make build` | `go build .` → `dockervc.exe` in the repo root |
 | `make test` | `go vet ./... ; go test ./...` |
 | one test, verbose | `go test ./internal/cli -run TestName -v` |
 | run the binary | `.\dockervc.exe <cmd>` from the repo root |
-| `make dist` / `install.sh` | never on Windows — packages and releases are cut on the mac |
+| `make dist` / `install.sh` | never on Windows — release packaging is cut on the mac |
 
-Throwaway store for anything live (session-scoped, per §6's rules):
-`$env:DOCKERVC_HOME = "$env:TEMP\dvctest"`.
+Terminal requirements: set **Windows Terminal** as your default terminal
+(VT-capable — the TUI depends on it), and keep one plain `cmd.exe` window
+around as the legacy-conhost fallback test case. Docker Desktop must be
+installed and **running** (Linux containers mode); check `docker version`.
 
-### 2.2 Demo engine bootstrap (mirrors the mac reference engine)
+## 3. Where the build stands: broken on purpose
 
-Run once in PowerShell with Docker Desktop up — recreates the disposable
-containers + volumes the mac dev environment uses, plus the custom network
-§5's matrix wants. Containers stay stateless; data lives in the volumes:
+`go vet ./...` fails with undefined `lockFile`/`unlockFile`
+(internal/store) and `freeSpace` (internal/cli). That is the removal: those
+symbols live in build-tagged Windows files that were deleted along with
+`packaging/install.ps1`, the Makefile's windows packaging, and the
+`%ProgramData%` store-path logic. `go test ./...` on the mac is green — the
+repo is healthy, it just has no Windows half.
+
+**Order of work:** make it compile and the suite pass (§4), then the TUI
+(§5), then Windows parity behaviors (§6). Verify as you go; do not batch
+verification to the end.
+
+## 4. Phase 1 — compile + green suite
+
+### 4.1 The store lock — write `internal/store/lock_windows.go`
+
+The store is single-writer: every opened store holds an exclusive lock on
+`<store>/lock` until closed. The Unix half exists (`internal/store/
+lock_unix.go`, build tag `//go:build !windows`, uses `flock` via
+`golang.org/x/sys/unix`). Write the Windows half with
+`//go:build windows`, same two functions, same signatures:
+
+```go
+func lockFile(f *os.File) error    // exclusive + non-blocking, whole file
+func unlockFile(f *os.File) error  // releases it
+```
+
+Use `windows.LockFileEx` with `LOCKFILE_EXCLUSIVE_LOCK |
+LOCKFILE_FAIL_IMMEDIATELY` over the whole-file range, and
+`windows.UnlockFileEx` over the **identical** range (ranges must match
+exactly). Sketch:
+
+```go
+func lockFile(f *os.File) error {
+    ol := new(windows.Overlapped)
+    return windows.LockFileEx(windows.Handle(f.Fd()),
+        windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY,
+        0, ^uint32(0), ^uint32(0), ol)
+}
+```
+
+Contract you must hold (the suite tests all of this):
+
+- A second `store.Open` on a locked store fails **immediately** with a
+  clear error, and closes everything it opened on the way out
+  (`openLocked` in `internal/store/store.go` already structures this —
+  your functions slot in; read it first).
+- `Store.Close()` closes the DB, then unlocks, then closes the lock file
+  handle, all unconditionally. Closing the handle releases the lock even
+  if the unlock call failed — keep that ordering.
+- **Windows gotcha the first port learned the hard way:** `LockFileEx`
+  byte-range locks conflict **even within one process** across handles
+  (Darwin's flock forgives a same-process second lock, which is why a
+  leaked-handle bug was invisible on the mac). Any store handle you fail
+  to close poisons every later command in that process AND keeps the
+  sqlite file undeletable (Windows cannot delete open files).
+  `TestRunArgsClosesStoreOnError` in `internal/cli/runargs_test.go`
+  guards exactly this — read its comment.
+
+### 4.2 Free-space check — write `internal/cli/freespace_windows.go`
+
+Export's pre-flight asks "is there room for this archive?" The Unix half
+(`internal/cli/freespace_unix.go`, `//go:build !windows`) returns
+`(availableToUser uint64, ok bool)` via `Statfs`. Windows half, same
+signature, via `GetDiskFreeSpaceExW` — the caller-available figure is the
+**first** out-param:
+
+```go
+//go:build windows
+
+package cli
+
+import "golang.org/x/sys/windows"
+
+func freeSpace(dir string) (uint64, bool) {
+    var avail, total, free uint64
+    p, err := windows.UTF16PtrFromString(dir)
+    if err != nil { return 0, false }
+    if err := windows.GetDiskFreeSpaceEx(p, &avail, &total, &free); err != nil {
+        return 0, false
+    }
+    return avail, true
+}
+```
+
+Verify: `export` prints no spurious space error on a healthy drive.
+
+### 4.3 Make the suite green on Windows
+
+With §4.1–§4.2 in, `go vet ./...` compiles and `go test ./...` should pass
+with **zero** modifications — the suite is cross-platform by design. The
+helpers that make that true already exist; know them, don't rewrite them:
+
+- `setHomeEnv` (internal/cli/tui_path_test.go) stubs the home dir via both
+  `HOME` and `USERPROFILE` — `os.UserHomeDir` reads USERPROFILE on Windows,
+  HOME on Unix.
+- `TestSplitPathSep` exercises path-completion splitting for both separator
+  styles on every platform.
+- The CLI tests run the real cobra tree against temp stores via
+  `DOCKERVC_HOME`; on Windows they will catch any handle leak as a cleanup
+  failure ("being used by another process") — treat those as real bugs,
+  never as flakiness.
+
+## 5. Phase 2 — the full-screen TUI on Windows
+
+The TUI (`internal/cli/tui.go`) is pure ANSI: alt-screen `\x1b[?1049h`,
+cursor hide, reverse video, `\x1b[H` home, `\x1b[K` erase. `openMenu`
+(tui.go) currently runs the TUI whenever stdin+stdout are terminals,
+falling back to `RunInteractive()` (line menu) otherwise. On Windows two
+things are missing:
+
+1. **VT output is not enabled.** Nothing turns on
+   `ENABLE_VIRTUAL_TERMINAL_PROCESSING` for stdout, so ANSI sequences print
+   literally in a legacy console. Add a build-tagged helper pair:
+   `internal/cli/vt_windows.go` (`//go:build windows`) calling
+   `SetConsoleMode` on `os.Stdout`'s handle to OR in the flag and reporting
+   success, and `internal/cli/vt_other.go` (`//go:build !windows`)
+   returning `true` (Unix terminals are always VT). Make it a package var
+   (`var enableVT = enableVTImpl` or similar) so a test can force it false.
+2. **The gate must require it.** `openMenu` becomes:
+   `if term.IsTerminal(in) && term.IsTerminal(out) && enableVT() { return runTUI() }`
+   — otherwise the line menu, exactly as piped input gets today. Keep
+   `runTUI`'s existing fallback if `term.MakeRaw` fails.
+
+Also best-effort at TUI startup: `SetConsoleOutputCP(65001)` so the UTF-8
+glyphs (✓ — · …) render; never fail startup over it, and **do not**
+transliterate the glyphs — functional parity means UTF-8 stays.
+
+Input needs no new work: `term.MakeRaw` (x/term) already sets
+`ENABLE_VIRTUAL_TERMINAL_INPUT` on Windows, so arrow keys arrive as the
+same `ESC [ A/B/C/D` sequences `readKey` parses. Verify, don't rewrite.
+
+Check on your machine: resize handling (`term.GetSize` in `refresh` —
+confirm it tracks Windows Terminal resizes), Ctrl-C (arrives as `0x03`
+with processed input off; `keyCtrlC` already quits), Esc-Esc quit prompt,
+dialog navigation, the scrollable output pane, and that `echo 1 |
+.\dockervc.exe cli` still gets the line menu, as does a plain cmd.exe
+window if VT enable failed.
+
+Add one test: `openMenu`'s gate falls back to the line menu when the
+enableVT var is false (that's why it's injectable).
+
+## 6. Phase 3 — Windows parity behaviors
+
+### 6.1 Default store location — `%ProgramData%`
+
+`store.DefaultPath()` (internal/store/store.go) currently resolves
+`$DOCKERVC_HOME` → `/var/lib/dockervc` if usable → `~/.dockervc`. Windows
+order: `$DOCKERVC_HOME` → `%ProgramData%\dockervc` when creatable and
+writable → `~/.dockervc`. Reuse the existing `isUsableDir` probe
+(mkdir + write a `.probe` file). `%ProgramData%` via `os.Getenv`, falling
+back to `C:\ProgramData`. Guard with `runtime.GOOS` so the mac path is
+byte-identical today; add a table test for the pure resolution logic.
+
+### 6.2 Installer — write `packaging/install.ps1`
+
+Per-user install, deliberately admin-free:
+
+- params: `-InstallDir` (default `$env:LOCALAPPDATA\Programs\dockervc`),
+  `-NoPath`
+- expects `dockervc.exe` next to the script (`$PSScriptRoot`) — that's how
+  the release zip lays it out
+- copies the exe into InstallDir, adds InstallDir to the **user** PATH if
+  absent (and tells the user to open a new terminal), runs
+  `dockervc.exe version` to verify, and checks `docker version` with a
+  friendly warning when Docker Desktop isn't running
+- `$ErrorActionPreference = "Stop"`; usage header comments like
+  packaging/install.sh has
+- test it end-to-end from an unzipped-style layout, and with `-NoPath`
+
+### 6.3 Packaging + docs (verified on Windows, executed on the mac)
+
+- Makefile: restore a `dist/windows-amd64` target
+  (`CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "$(LDFLAGS)"
+  -o dist/windows-amd64/dockervc.exe .`) and a zip packaging step
+  (`cp packaging/install.ps1 README.md dist/windows-amd64/` then zip the
+  folder as `dockervc-$(VERSION)-windows-amd64.zip`). You can't run make;
+  verify the equivalent `go build` command works, and that the zip's
+  layout matches what install.ps1 expects.
+- README.md: restore a Windows install section mirroring the macOS one
+  (download zip → extract → `powershell -ExecutionPolicy Bypass -File
+  .\install.ps1`), note the named-pipe Docker transport is automatic, and
+  add `%ProgramData%\dockervc` back to the store-location table.
+
+## 7. Known Windows facts — already handled, verify don't rewrite
+
+These exist in cross-platform code today; your job is to confirm they hold
+live on Windows:
+
+- **Path completion separators.** `splitPathToken`/`splitPathSep`
+  (internal/cli/tui_path.go) splits on `/` plus `\` on Windows, and bare
+  `C:` / `C:\` list the drive root. Directory completions carry the OS
+  separator. Covered by `TestSplitPathSep`; verify live in the TUI with a
+  real `C:\Users\…` path.
+- **Docker transport.** `client.FromEnv` only — defaults to
+  `npipe:////./pipe/docker_engine` on Windows; `DOCKER_HOST` honored.
+  Nothing to write; verify against a running Docker Desktop.
+- **Archive byte-parity.** `.dvca` tar entry names are forward-slash string
+  concatenation (`objectsPrefix + hash`), never `filepath.Join` — so a
+  Windows-built archive is structurally identical to a mac's. Never
+  regress this; §9 item 5 is the proof.
+- **Restore tags.** Containers restore under deterministic tags
+  `<name>-restored-from-<snapID>` — no Windows angle, but they appear in
+  every rollback verification.
+
+## 8. Demo engine bootstrap
+
+Run once in PowerShell with Docker Desktop up — disposable containers,
+data in volumes, mirroring the mac reference engine, plus the network §9
+wants:
 
 ```powershell
 docker network create demo-net
@@ -97,213 +306,65 @@ docker run -d --name demo-sidecar alpine sleep 1d
 docker stop demo-sidecar
 ```
 
-`demo-web` and `demo-worker` run (one with a web root, one heartbeating into
-its volume); `demo-sidecar` is the stopped stateless one. Wipe it all with:
-`docker rm -f demo-web demo-worker demo-sidecar; docker volume rm demo-data
-demo-worker-data; docker network rm demo-net`.
+Wipe it later with `docker rm -f demo-web demo-worker demo-sidecar; docker
+volume rm demo-data demo-worker-data; docker network rm demo-net`.
 
-## 3. What the 2026-09-12 audit already established (don't redo, do re-verify)
+## 9. Verification matrix (record real output for each)
 
-| Area | State | Where |
-|---|---|---|
-| Docker transport | `client.FromEnv` only → defaults to `npipe:////./pipe/docker_engine` on Windows; `DOCKER_HOST` honored | `internal/dockerapi/client.go:26` |
-| Store lock | `LockFileEx` exclusive + `FAIL_IMMEDIATELY`, whole-file range — flock equivalent | `internal/store/lock_windows.go` |
-| Store path | `%ProgramData%\dockervc` when creatable/writable (probe-written), else `~/.dockervc` | `internal/store/store.go:41` |
-| `.dvca` format parity | tar entry names are forward-slash string concat (`objectsPrefix + hash`), never `filepath.Join` → Windows archives structurally identical | `internal/portable/write.go` |
-| TUI gate | `runtime.GOOS != "windows" && IsTerminal(in) && IsTerminal(out)` → Windows always gets the line menu today | `internal/cli/tui.go:27` |
-| No ANSI outside TUI | grep-verified zero escape sequences in non-TUI output | `internal/cli/*` |
-| install.ps1 | copy to `%LOCALAPPDATA%\Programs\dockervc`, user PATH, `version` verify, docker check | `packaging/install.ps1` |
+Setup: fresh store in `$env:TEMP\dvctest` via `$env:DOCKERVC_HOME`, and
+the §8 engine.
 
-Known gaps the audit found (these become work items):
-
-1. `freeSpace()` on Windows is a no-op stub → export skips the disk-space
-   pre-flight (`internal/cli/freespace_windows.go`)
-2. TUI never runs on Windows (line menu only)
-3. Path completion splits tokens on `/` only — Windows `\`-style paths won't
-   complete
-4. UTF-8 glyphs (`✗ — · …`) may garble in legacy conhost codepage 437
-
-## 4. Work items
-
-### G1 — Enable the full-screen TUI on Windows
-
-The TUI is pure ANSI: alt-screen (`\x1b[?1049h`), cursor hide, reverse video,
-`\x1b[H` home, `\x1b[K` erase (see `runTUI`, `internal/cli/tui.go:190`, and
-`render`, `tui.go:1038`). On Windows this needs virtual-terminal mode:
-
-- **Input:** `term.MakeRaw(fd)` (already called) — x/term's Windows
-  implementation sets `ENABLE_VIRTUAL_TERMINAL_INPUT` and disables
-  processed/line/echo input, so arrow keys arrive as the same `ESC [ A/B/C/D`
-  sequences `readKey`/`parseKey` already parse. Verify, don't rewrite.
-- **Output:** nothing enables `ENABLE_VIRTUAL_TERMINAL_PROCESSING` on the
-  stdout handle today. Add a small build-tagged helper
-  (`internal/cli/vt_windows.go`, with a `//go:build windows` counterpart
-  returning true elsewhere) that calls `SetConsoleMode` on `os.Stdout` to OR
-  in `ENABLE_VIRTUAL_TERMINAL_PROCESSING`, and reports whether it succeeded.
-- **Gate:** change `openMenu` (`internal/cli/tui.go:24`) to attempt the TUI
-  on Windows **only when** stdin+stdout are a terminal **and** VT processing
-  could be enabled; otherwise fall back to `RunInteractive()` (the line
-  menu), exactly as piped input does today. Concretely:
-  `if term.IsTerminal(in) && term.IsTerminal(out) && enableVT() { return runTUI() }`
-  — drop the `runtime.GOOS != "windows"` clause, keep `runTUI`'s existing
-  MakeRaw-failure fallback.
-- **Check on the Windows box:** resize handling (`term.GetSize` is called in
-  `refresh`/render — confirm it tracks Windows Terminal resizes), Ctrl-C
-  (arrives as `0x03` with processed input off — `keyCtrlC` already quits),
-  Esc-Esc quit prompt, dialog navigation, scrollable output pane.
-- **Test updates:** the TUI tests construct `&tui{}` directly and are
-  OS-independent; add one test that `openMenu`'s gate falls back to the line
-  menu when `enableVT()` is false (inject the helper as a package var so the
-  test can force it).
-
-### G2 — Path completion for Windows paths
-
-`internal/cli/tui_path.go`:
-
-- `splitPathToken` (`tui_path.go:48`) splits on `/` only via
-  `strings.LastIndexByte(tok, '/')`. A user typing `C:\Users\me\Des` gets
-  dir `"."` and the whole string as prefix — completion silently lists the
-  cwd. Fix: also treat `\` as a separator **on Windows**
-  (`runtime.GOOS == "windows"` guard so darwin behavior is untouched —
-  backslash is a legal filename char on Unix).
-- Directory candidates get a trailing `/` appended after `filepath.Join`
-  (`pathMatches`, `tui_path.go:39`). On Windows `filepath.Join` yields `\`
-  separators; appending `/` gives mixed separators (`C:\exports/sub/`). Go's
-  filepath/os accept mixed separators, but normalize anyway: complete with
-  the OS separator (`string(filepath.Separator)`) so what lands in the input
-  line is consistent, and make sure a completed `\`-terminated token
-  re-splits correctly next Tab (covered by the G1 change to
-  `splitPathToken`).
-- `displayDir` (`tui_path.go:142`) shortens under home with
-  `home + string(filepath.Separator)` — already separator-correct. Verify
-  `~/…` display on Windows.
-- Drive roots: `C:` (no slash) and `C:\` must list sensibly;
-  `splitPathToken`'s `case 0` ("/" root) logic needs a Windows analog for
-  `C:\` (dir `C:\`, empty prefix). Consider that `C:` alone means the *current directory
-  of drive C* to Windows APIs — simplest correct move: treat a trailing
-  `C:` token's dir as `C:\` for listing purposes, and document it.
-- Update/extend `tui_path_test.go` with table cases for both separators
-  (tests run on all platforms; use `runtime.GOOS` guards or test the pure
-  split logic with injected separator behavior).
-
-### G3 — Real free-space check on Windows
-
-Replace the stub in `internal/cli/freespace_windows.go` with
-`GetDiskFreeSpaceExW` from `golang.org/x/sys/windows` (already a dependency):
-
-```go
-func freeSpace(dir string) (uint64, bool) {
-    var avail, total, free uint64
-    p, err := windows.UTF16PtrFromString(dir)
-    if err != nil { return 0, false }
-    if err := windows.GetDiskFreeSpaceEx(p, &avail, &total, &free); err != nil {
-        return 0, false
-    }
-    return avail, true
-}
-```
-
-Match `freespace_unix.go`'s contract: `(available-to-user, ok)` — that's
-`lpFreeBytesAvailableToCaller`, the third-argument **first** out-param.
-Verify with: `export` prints no spurious space error on a healthy drive, and
-the pre-flight fires on a nearly-full drive (a small USB/quota'd volume is
-the easy test rig).
-
-### G4 — UTF-8 console output (best-effort)
-
-`✗ BROKEN` (log), `—`, `·`, `…` notes: fine in Windows Terminal, mojibake in
-legacy conhost (codepage 437). In the same `vt_windows.go` helper (or beside
-it), best-effort call `SetConsoleOutputCP(65001)` at TUI startup; never fail
-startup over it. Do **not** transliterate the glyphs — functional parity with
-darwin means UTF-8 stays. If VT enable fails on a legacy console the line
-menu is used anyway (G1), where the odd glyph is cosmetic only.
-
-### G5 — Live verification and fix what surfaces
-
-Execute §5's matrix on real Windows + Docker Desktop with throwaway stores
-(`$env:DOCKERVC_HOME = $env:TEMP + "\dvctest"`). Fix anything that fails;
-record it in the report. Expect the plausible surprises to be: ProgramData
-permissions when installed per-user, Docker Desktop pipe availability when
-the engine is still starting (error message quality), and antivirus
-sensitivity to a fresh unsigned exe writing to ProgramData.
-
-## 5. Verification matrix (mirror of the darwin-arm64 testing)
-
-Setup: fresh store in `$env:TEMP\dvctest`; demo engine entities to create
-and later delete: one running container, one stopped container, a named
-volume with known files, a custom network.
-
-1. **Install:** `install.ps1` → new terminal → `dockervc version`,
-   `dockervc man`
-2. **Store:** `init` → confirm `C:\ProgramData\dockervc` (or `~/.dockervc`
-   fallback) → **lock check:** start `dockervc snapshot` of something slow
-   and run `dockervc log` concurrently → second must refuse with the lock
-   message, not corrupt
+1. **Build & smoke:** `go build .` → `.\dockervc.exe version`, `man`
+2. **Store:** `init` → confirm `%ProgramData%\dockervc` (or home fallback)
+   → **lock check:** run `.\dockervc.exe snapshot` and, while it runs,
+   `.\dockervc.exe log` in a second terminal → the second must refuse with
+   the lock message, not corrupt
 3. **Snapshot / history:** `snapshot -m` (full + `--only containers,volumes`
-   + `--stop`), `log`, `show`, `status`, `diff` (+`--files <vol>`)
-4. **Rollback:** change volume contents + container state → `rollback --all`;
-   byte-exact volume check; granular `--volumes`; `--dry-run`; a second
-   rollback to roll back the checkpoint; broken-snapshot refusal (move one
-   object file aside temporarily, like the darwin test did)
-5. **Export/import:** `export` (default `exports\` folder created on demand;
-   `-o` to a `C:\`-nested path) → copy the `.dvca` to a darwin-arm64 mac →
-   `dockervc import` there → verify + `show` → **cross-platform parity
-   proven**; then the reverse direction (mac-exported archive → Windows
-   import, `--apply` rollback chain). Tamper a byte in a copy → import must
-   reject atomically. Re-import → verified no-op.
-6. **Health:** `doctor` (clean), `--deep`, object-file corruption → broken
-   marker in `log` → `doctor --repair` interactive flow
+   + `--stop`), `log`, `show`, `status`, `diff` (+`--files demo-data`)
+4. **Rollback:** mutate a volume (`docker run --rm -v demo-data:/data busybox
+   sh -c "echo mutated > /data/notes.txt"`), delete demo-web, then
+   `rollback <snap> --all --dry-run` → apply → volume byte-restored,
+   demo-web recreated; granular `--volumes demo-data` touches nothing else;
+   `--keep-current` skips the checkpoint; re-run → skips (idempotent)
+5. **Export/import cross-platform (the parity keystone):** `export` to a
+   `C:\`-nested `-o` path → get the `.dvca` to the maintainer's mac
+   (ask the user) and have it imported there; then the reverse direction
+   (mac-exported archive → Windows `import`, then `import --apply`).
+   Tamper one byte in a copy → import must reject atomically; re-import →
+   verified no-op
+6. **Health:** `doctor` clean, `--deep`; move one object file aside →
+   broken marker in `log` → `doctor --repair` flow
 7. **Maintenance:** multi-`delete`, `prune` reclaim count
 8. **Settings:** `config set export.folder C:\Users\...\backups` → bare
    `export` honors it → `config unset export.folder` → back to `exports\`;
    `config unset bogus` refused; `config unset zstd_level` → 3
-9. **TUI:** `dockervc cli` in Windows Terminal — menus, dialogs, snapshot-id
-   Tab completion, **path Tab completion of `C:\`-style paths** (after G2),
-   scrollable output, Esc-Esc quit; piped `echo 1 | dockervc cli` still gets
-   the line menu; legacy conhost gets the line menu (after G1 gate)
-10. **Free space:** export to a nearly-full volume → pre-flight error names
-    real free space (after G3)
-11. **Regressions on the reference platform:** on the darwin-arm64 mac:
-    `go vet ./... && go test ./...` green, `make dist` builds both release
-    packages, and a spot-check
-    of TUI + export/import
+9. **TUI:** `.\dockervc.exe cli` in Windows Terminal — menus, dialogs,
+   snapshot-id Tab completion, **path Tab completion of `C:\` paths**,
+   scrollable output, Esc-Esc quit; piped input → line menu; legacy
+   conhost → line menu (the §5 gate)
+10. **Free space:** export to a nearly-full volume (small USB drive) →
+    pre-flight error names the real free space
+11. **Suite:** `go vet ./... ; go test ./...` green on Windows. Mac-side
+    regression (`go vet ./... && go test ./...`, `make dist`) is run by
+    the maintainer — request it before hand-back.
 
-## 6. Constraints and conventions
+## 10. Deliverables and hand-back
 
-- **Never mutate a real store.** All testing goes through throwaway
-  `DOCKERVC_HOME` directories. `--store <path>` exists for targeted cases.
-- **No binaries in git.** `dist/`, the root `dockervc`/`dockervc.exe` are
-  gitignored; never commit them.
-- **gofmt only files you author.** `doctor.go`, `maintenance.go`,
-  `snapshot.go`, `status.go` are pre-existing non-gofmt — leave them.
-- **Version policy:** bump `Makefile` `VERSION` only for what ships
-  (patch = fixes, minor = features); every bump ships as a commit naming the
-  version + push; tag + `gh release` with all 6 packages only on explicit
-  user approval. Suggested label for this work when approved: **v0.5.1**
-  (fixes + platform parity, no new user-facing feature).
-- **Keep the line-menu fallback** — piped input and non-VT consoles depend on
-  it; it is also the Windows CI-friendly path.
-- **No new dependencies** unless unavoidable; `golang.org/x/sys/windows` and
-  `golang.org/x/term` are already in go.mod.
-- Commit messages end with:
-  `Co-Authored-By: Claude Code <noreply@anthropic.com>`
+1. Branch `windows-port` pushed, with code for §4–§6 (+ anything §9
+   surfaced), tests included
+2. Windows-side `go vet ./... && go test ./...` green
+3. `WINDOWSREPORT.md` in the repo root: per-feature verdict table, findings
+   register (severity + fix status), the §9 matrix with actual results, and
+   a plain statement of what was **not** tested
+4. Hand back to the maintainer (the user): they merge to main, then cut
+   **v0.6.0** from the mac — `make dist` (which by then packages both
+   platforms again), tag, GitHub release — on their explicit approval only
 
-## 7. Deliverables
-
-1. Code changes for G1–G4 (+ anything G5 surfaced), with tests
-2. Windows-side `go vet ./... && go test ./...` green, and darwin-side green
-3. `make dist` builds both release packages (built on the mac or any *nix
-   box; Windows packaging is
-   zip via the Makefile)
-4. A `WINDOWSREPORT.md`: per-feature verdict table, findings register
-   (severity + fix status), and the §5 matrix with actual results. State
-   plainly what was **not** tested.
-
-## 8. Out of scope
+## 11. Out of scope
 
 - winget/choco/scoop packaging, code signing, SmartScreen appeasement
 - Windows Containers mode (Docker Desktop Linux containers only, matching
-   darwin behavior)
+  the mac)
 - cygwin/msys terminal quirks beyond "line menu works there"
-- Any behavior change on darwin/linux other than the shared `splitPathToken`
-   Windows guard, which must be a no-op off Windows
+- Any behavior change on darwin/linux beyond `runtime.GOOS`-guarded
+  additions, which must be no-ops off Windows

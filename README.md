@@ -15,27 +15,10 @@ compare, and (in the current roadmap) roll back and migrate them.
 ## Install
 
 Prebuilt packages live on the [Releases page](https://github.com/mmc003/dockervc/releases)
-for Apple-silicon macOS (`darwin-arm64`) and x64 Windows (`windows-amd64`) —
-the two supported platforms (the `dist/` directory is build output and is
-not committed). Anything else builds from source: `go build .` for the
-current platform; Go cross-compiles too.
-
-### Windows (primary target)
-
-1. Download and extract the release `.zip` from
-   [Releases](https://github.com/mmc003/dockervc/releases) (`windows-amd64`).
-2. Open PowerShell **inside the extracted folder** and run:
-
-   ```powershell
-   powershell -ExecutionPolicy Bypass -File .\install.ps1
-   ```
-
-   This copies `dockervc.exe` to `%LOCALAPPDATA%\Programs\dockervc` and puts
-   it on your user PATH. Open a new terminal afterwards.
-
-> Docker Desktop must be installed and running. On Windows the Docker API is
-> reached over its named pipe — nothing to configure, `dockervc` finds it
-> automatically (standard `DOCKER_HOST` overrides work too).
+for Apple-silicon macOS (`darwin-arm64`) — the supported release platform
+(the `dist/` directory is build output and is not committed). Anything else
+builds from source: `go build .` for the current platform; Go cross-compiles
+too.
 
 ### macOS (Apple silicon)
 
@@ -59,8 +42,8 @@ of everything, or `dockervc man` for the full command reference.
 `dockervc cli` is a full-screen TUI (unix terminals): arrow keys or numbers
 select commands, the argument each command takes is shown next to its name,
 command output appears in a scrollable pane, and snapshot ids Tab-complete
-(`show 16` + Tab). Quit with Ctrl-C, or press Esc twice. Piped input and
-Windows fall back to a line-based menu.
+(`show 16` + Tab). Quit with Ctrl-C, or press Esc twice. Piped input falls
+back to a line-based menu.
 
 ```sh
 dockervc init                     # one-time: create the snapshot store
@@ -147,7 +130,6 @@ Snapshots taken before file indexing existed fall back to a plain
 
 | OS | Default store |
 |---|---|
-| Windows | `%ProgramData%\dockervc` |
 | Linux | `/var/lib/dockervc` |
 | macOS | `~/.dockervc` (or `/var/lib/dockervc` if you `sudo mkdir` it first) |
 | Any | override with `DOCKERVC_HOME` or `--store <path>` |

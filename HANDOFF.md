@@ -285,7 +285,7 @@ prints the plan and exits 0 without touching Docker or the store.
 >   (ID-collision policy; same manifest hash → `ErrAlreadyImported` no-op).
 > - Export refuses broken snapshots (the same `missingObjects` gate rollback
 >   uses), refuses an existing `-o` target without `--yes`, does a best-effort
->   free-space check (`syscall.Statfs`, unix; skipped on Windows), and lands
+>   free-space check (`syscall.Statfs`, unix-only), and lands
 >   the file atomically via `tmp/` + rename.
 > - `import --apply` chains the **public** rollback API unchanged
 >   (`rollbackPrompt`/`printRollbackWarnings` reused from rollback.go, same

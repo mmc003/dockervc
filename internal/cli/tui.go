@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"runtime"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -21,11 +20,9 @@ import (
 )
 
 // openMenu launches the best interactive front-end for the environment: the
-// full-screen TUI on a unix terminal, the line-based loop otherwise (piped
-// stdin, Windows).
+// full-screen TUI on a terminal, the line-based loop otherwise (piped stdin).
 func openMenu() error {
-	if runtime.GOOS != "windows" &&
-		term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) {
+	if term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) {
 		return runTUI()
 	}
 	return RunInteractive()

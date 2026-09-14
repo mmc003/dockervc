@@ -5,9 +5,10 @@ indexes, rollback). Step 4 (export/import) is specified but not implemented —
 **see [HANDOFF.md](HANDOFF.md) for the implementation brief**;
 this document is the architecture intent, HANDOFF.md is ground truth for what
 exists in code today.
-**Target:** Windows, Linux and macOS hosts; 100% local operation, no cloud
-dependencies. Windows-to-Windows migration via export/import is the primary
-deployment story (see §5), with Linux/macOS as first-class secondary targets.
+**Target:** Linux and macOS hosts; 100% local operation, no cloud
+dependencies. Host-to-host migration via export/import is the primary
+deployment story (see §5). (Windows support shipped broken in v0.5.0 and was
+removed; see WINDOWS-PLAN.md for the from-scratch rebuild.)
 
 ---
 
@@ -46,7 +47,7 @@ Single binary name: `dockervc`.
 └────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Storage layout (default: `%ProgramData%\dockervc` on Windows, `/var/lib/dockervc` on Linux, `~/.dockervc` on macOS; override with `DOCKERVC_HOME` or `--store`)
+### Storage layout (default: `/var/lib/dockervc` on Linux, `~/.dockervc` on macOS; override with `DOCKERVC_HOME` or `--store`)
 
 ```
 /var/lib/dockervc/
@@ -85,8 +86,7 @@ A snapshot = immutable manifest + referenced objects.
   their project membership.
 
 **What is intentionally NOT captured** (documented limitations): in-memory process state,
-ephemeral/anonymous volumes (opt-in), container IPs (reassigned by Docker), Swarm services,
-Windows containers.
+ephemeral/anonymous volumes (opt-in), container IPs (reassigned by Docker), Swarm services.
 
 ---
 
