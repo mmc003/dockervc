@@ -61,6 +61,47 @@ Key architecture facts that constrain the work:
 - A real terminal for TUI work: **Windows Terminal** (VT-capable). Also keep
   a legacy `conhost` (plain cmd.exe window) around for fallback testing.
 
+### 2.1 Dev loop on Windows (no make needed)
+
+The Makefile is the *mac* side of the workflow: `make dist` cross-compiles
+and packages releases (it shells out to tar/zip/chmod, so it only runs on
+the mac), and `make test` is a thin wrapper. Nothing in it is required on
+the Windows box — Go and git are the whole toolchain:
+
+| mac | Windows |
+|---|---|
+| `make build` | `go build .` → `dockervc.exe` in the repo root |
+| `make test` | `go vet ./... ; go test ./...` |
+| one test, verbose | `go test ./internal/cli -run TestName -v` |
+| run the binary | `.\dockervc.exe <cmd>` from the repo root |
+| `make dist` / `install.sh` | never on Windows — packages and releases are cut on the mac |
+
+Throwaway store for anything live (session-scoped, per §6's rules):
+`$env:DOCKERVC_HOME = "$env:TEMP\dvctest"`.
+
+### 2.2 Demo engine bootstrap (mirrors the mac reference engine)
+
+Run once in PowerShell with Docker Desktop up — recreates the disposable
+containers + volumes the mac dev environment uses, plus the custom network
+§5's matrix wants. Containers stay stateless; data lives in the volumes:
+
+```powershell
+docker network create demo-net
+docker volume create demo-data
+docker volume create demo-worker-data
+docker run --rm -v demo-data:/data busybox sh -c "echo 'demo site v1' > /data/index.html; echo 42 > /data/counter.txt; mkdir -p /data/logs; echo app > /data/logs/app.log"
+docker run --rm -v demo-worker-data:/data busybox sh -c "echo seed > /data/notes.txt"
+docker run -d --name demo-web --network demo-net -v demo-data:/usr/share/nginx/html:ro nginx:alpine
+docker run -d --name demo-worker -v demo-worker-data:/data busybox sh -c "while true; do date >> /data/heart.txt; sleep 30; done"
+docker run -d --name demo-sidecar alpine sleep 1d
+docker stop demo-sidecar
+```
+
+`demo-web` and `demo-worker` run (one with a web root, one heartbeating into
+its volume); `demo-sidecar` is the stopped stateless one. Wipe it all with:
+`docker rm -f demo-web demo-worker demo-sidecar; docker volume rm demo-data
+demo-worker-data; docker network rm demo-net`.
+
 ## 3. What the 2026-09-12 audit already established (don't redo, do re-verify)
 
 | Area | State | Where |
