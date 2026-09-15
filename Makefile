@@ -6,9 +6,8 @@ LDFLAGS := -s -w -X dockervc/internal/cli.Version=$(VERSION)
 # run; without .PHONY, make would treat them as up to date and package stale
 # binaries on later builds.
 #
-# Supported release platform: Apple-silicon macOS (darwin-arm64). Everything
-# else builds from source with `go build .` (Go cross-compiles).
-.PHONY: all build test clean dist dist/darwin-arm64
+# Supported release platforms: Apple-silicon macOS and Windows amd64.
+.PHONY: all build test clean dist dist/darwin-arm64 dist/windows-amd64
 
 all: build
 
@@ -22,6 +21,9 @@ test:
 dist/darwin-arm64:
 	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o dist/darwin-arm64/dockervc .
 
+dist/windows-amd64:
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o dist/windows-amd64/dockervc.exe .
+
 # Tar.gz packaging.
 define package_unix
 	cp packaging/install.sh packaging/uninstall.sh README.md dist/$(1)/
@@ -29,10 +31,12 @@ define package_unix
 	cd dist && tar czf dockervc-$(VERSION)-$(1).tar.gz $(1)
 endef
 
-dist: dist/darwin-arm64
+dist: dist/darwin-arm64 dist/windows-amd64
 	$(call package_unix,darwin-arm64)
+	cp packaging/install.ps1 README.md dist/windows-amd64/
+	cd dist && zip -q -r dockervc-$(VERSION)-windows-amd64.zip windows-amd64
 	@echo "Packages in dist/:"
-	@ls -lh dist/*.tar.gz
+	@ls -lh dist/*.tar.gz dist/*.zip
 
 clean:
 	rm -rf dist dockervc

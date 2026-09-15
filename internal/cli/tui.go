@@ -1,4 +1,4 @@
-// Full-screen TUI for `dockervc cli` (unix terminals). Renders into the
+// Full-screen TUI for `dockervc cli` (VT-capable terminals). Renders into the
 // alternate screen buffer with an arrow-key menu, a scrollable output pane
 // for command results, dialog prompts for guided flows, and Tab-completion
 // for snapshot ids. Every action still executes through the real cobra
@@ -21,11 +21,18 @@ import (
 
 // openMenu launches the best interactive front-end for the environment: the
 // full-screen TUI on a terminal, the line-based loop otherwise (piped stdin).
+var (
+	enableVT          = enableVTImpl
+	isTerminal        = term.IsTerminal
+	runFullScreenMenu = runTUI
+	runLineMenu       = RunInteractive
+)
+
 func openMenu() error {
-	if term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) {
-		return runTUI()
+	if isTerminal(int(os.Stdin.Fd())) && isTerminal(int(os.Stdout.Fd())) && enableVT() {
+		return runFullScreenMenu()
 	}
-	return RunInteractive()
+	return runLineMenu()
 }
 
 // ── key events ────────────────────────────────────────────────────────────────

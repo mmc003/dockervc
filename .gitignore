@@ -1,6 +1,9 @@
 dockervc
+dockervc.exe
 dist/
 devstore/
 *.dvca
 .claude/
 exports/
+.gocache/
+.gomodcache/

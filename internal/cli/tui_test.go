@@ -7,6 +7,39 @@ import (
 	"dockervc/internal/store"
 )
 
+func TestOpenMenuFallsBackWhenVTUnavailable(t *testing.T) {
+	originalEnableVT := enableVT
+	originalIsTerminal := isTerminal
+	originalFullScreen := runFullScreenMenu
+	originalLineMenu := runLineMenu
+	t.Cleanup(func() {
+		enableVT = originalEnableVT
+		isTerminal = originalIsTerminal
+		runFullScreenMenu = originalFullScreen
+		runLineMenu = originalLineMenu
+	})
+
+	isTerminal = func(int) bool { return true }
+	enableVT = func() bool { return false }
+	fullScreenCalled := false
+	lineMenuCalled := false
+	runFullScreenMenu = func() error {
+		fullScreenCalled = true
+		return nil
+	}
+	runLineMenu = func() error {
+		lineMenuCalled = true
+		return nil
+	}
+
+	if err := openMenu(); err != nil {
+		t.Fatalf("openMenu: %v", err)
+	}
+	if fullScreenCalled || !lineMenuCalled {
+		t.Fatalf("full-screen called=%v, line menu called=%v; want VT fallback", fullScreenCalled, lineMenuCalled)
+	}
+}
+
 // TestInputKeyEmptyNoPanic guards the crash where backspacing (or Enter)
 // emptied the ':' command line and updateCompletions indexed toks[0] of an
 // empty slice — any executed :command or backspace-to-empty killed the TUI.

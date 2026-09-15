@@ -113,7 +113,11 @@ var configCmd = &cobra.Command{
 			if !knownSetting(args[1]) {
 				return fmt.Errorf("unknown setting %q (known: zstd_level, export.folder)", args[1])
 			}
-			if err := st.ConfigDelete(args[1]); err != nil {
+			if args[1] == "zstd_level" {
+				if err := st.ConfigSet("zstd_level", "3"); err != nil {
+					return err
+				}
+			} else if err := st.ConfigDelete(args[1]); err != nil {
 				return err
 			}
 			fmt.Printf("%s unset — back to its default\n", args[1])

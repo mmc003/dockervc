@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	_ "modernc.org/sqlite" // registers the "sqlite" driver (pure Go, CGO-free)
 )
@@ -30,16 +31,28 @@ type Store struct {
 }
 
 // DefaultPath returns the default store location: $DOCKERVC_HOME if set;
-// otherwise /var/lib/dockervc when usable; otherwise ~/.dockervc.
+// otherwise a writable system path (%ProgramData%\dockervc on Windows,
+// /var/lib/dockervc elsewhere); otherwise ~/.dockervc.
 func DefaultPath() string {
-	if p := os.Getenv("DOCKERVC_HOME"); p != "" {
-		return p
+	systemPath := "/var/lib/dockervc"
+	if runtime.GOOS == "windows" {
+		programData := os.Getenv("ProgramData")
+		if programData == "" {
+			programData = `C:\ProgramData`
+		}
+		systemPath = filepath.Join(programData, "dockervc")
 	}
-	const systemPath = "/var/lib/dockervc"
-	if isUsableDir(systemPath) {
+	return resolveDefaultPath(os.Getenv("DOCKERVC_HOME"), systemPath, isUsableDir, os.UserHomeDir)
+}
+
+func resolveDefaultPath(override, systemPath string, usable func(string) bool, userHome func() (string, error)) string {
+	if override != "" {
+		return override
+	}
+	if usable(systemPath) {
 		return systemPath
 	}
-	home, err := os.UserHomeDir()
+	home, err := userHome()
 	if err != nil {
 		return systemPath
 	}

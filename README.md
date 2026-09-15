@@ -14,16 +14,34 @@ compare, and (in the current roadmap) roll back and migrate them.
 
 ## Install
 
-Prebuilt packages live on the [Releases page](https://github.com/mmc003/dockervc/releases)
-for Apple-silicon macOS (`darwin-arm64`) — the supported release platform
-(the `dist/` directory is build output and is not committed). Anything else
-builds from source: `go build .` for the current platform; Go cross-compiles
-too.
+Prebuilt packages live on the [Releases page](../../releases) for Windows
+amd64 and Apple-silicon macOS (the `dist/` directory is build output and is
+not committed). Other platforms can build from source with `go build .`.
+
+### Windows (amd64)
+
+Download and extract `dockervc-<version>-windows-amd64.zip` from
+[Releases](../../releases). Open PowerShell inside the extracted
+`windows-amd64` folder, then run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+The installer copies `dockervc.exe` to
+`%LOCALAPPDATA%\Programs\dockervc` and adds that folder to your user PATH;
+open a new terminal afterward. It is per-user and does not require
+administrator privileges. Use `-NoPath` to skip the PATH change, or
+`-InstallDir <path>` to choose another location.
+
+Docker Desktop must be running in Linux containers mode. The Docker API's
+Windows named-pipe transport is selected automatically; a standard
+`DOCKER_HOST` override is also honored.
 
 ### macOS (Apple silicon)
 
 Download the `darwin-arm64` archive from
-[Releases](https://github.com/mmc003/dockervc/releases), then:
+[Releases](../../releases), then:
 
 ```sh
 tar xzf dockervc-<version>-darwin-arm64.tar.gz
@@ -34,7 +52,7 @@ sudo ./install.sh          # or: ./install.sh --prefix ~/bin
 > On an Intel Mac or a Linux box, build from source instead — `go build .`
 > produces a binary for the machine you're on.
 
-### Uninstall
+### Uninstall (macOS)
 
 Run the uninstaller from the same extracted release folder (or grab
 `packaging/uninstall.sh` from the repo — it needs nothing next to it):
@@ -49,16 +67,22 @@ lives (`~/.dockervc`, `/var/lib/dockervc`, or `$DOCKERVC_HOME`). The store
 itself is left alone: it holds your snapshots, so deleting it stays a
 decision you make by hand with `rm -rf`.
 
+On Windows, remove the installed `dockervc.exe` (or its install folder) and
+remove that folder from your user PATH. The snapshot store is deliberately
+left untouched at `%ProgramData%\dockervc` or your configured override.
+
 ## Quick start
 
 Don't want to memorize commands? Run `dockervc cli` for an interactive menu
 of everything, or `dockervc man` for the full command reference.
 
-`dockervc cli` is a full-screen TUI (unix terminals): arrow keys or numbers
+`dockervc cli` is a full-screen TUI in VT-capable terminals, including
+Windows Terminal: arrow keys or numbers
 select commands, the argument each command takes is shown next to its name,
 command output appears in a scrollable pane, and snapshot ids Tab-complete
-(`show 16` + Tab). Quit with Ctrl-C, or press Esc twice. Piped input falls
-back to a line-based menu.
+(`show 16` + Tab); filesystem prompts also complete Windows paths such as
+`C:\Users\...`. Quit with Ctrl-C, or press Esc twice. Piped input and consoles
+without VT support fall back to a line-based menu.
 
 ```sh
 dockervc init                     # one-time: create the snapshot store
@@ -145,6 +169,7 @@ Snapshots taken before file indexing existed fall back to a plain
 
 | OS | Default store |
 |---|---|
+| Windows | `%ProgramData%\dockervc` |
 | Linux | `/var/lib/dockervc` |
 | macOS | `~/.dockervc` (or `/var/lib/dockervc` if you `sudo mkdir` it first) |
 | Any | override with `DOCKERVC_HOME` or `--store <path>` |
