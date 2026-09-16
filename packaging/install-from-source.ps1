@@ -60,6 +60,7 @@ try {
 
 $stageInstaller = Join-Path $stage "install.ps1"
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot "install.ps1") -Destination $stageInstaller -Force
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot "uninstall.ps1") -Destination $stage -Force
 Copy-Item -LiteralPath (Join-Path $repoRoot "README.md") -Destination $stage -Force
 
 $installerParams = @{}

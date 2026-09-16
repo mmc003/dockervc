@@ -1,5 +1,5 @@
 # Bump VERSION on every change that ships: patch = fixes, minor = features.
-VERSION ?= 0.5.1
+VERSION ?= 0.6.0
 LDFLAGS := -s -w -X dockervc/internal/cli.Version=$(VERSION)
 
 # The per-platform dist targets are directories that exist after the first
@@ -33,10 +33,15 @@ endef
 
 dist: dist/darwin-arm64 dist/windows-amd64
 	$(call package_unix,darwin-arm64)
-	cp packaging/install.ps1 README.md dist/windows-amd64/
+	cp packaging/install.ps1 packaging/uninstall.ps1 README.md dist/windows-amd64/
 	cd dist && zip -q -r dockervc-$(VERSION)-windows-amd64.zip windows-amd64
 	@echo "Packages in dist/:"
 	@ls -lh dist/*.tar.gz dist/*.zip
 
+ifeq ($(OS),Windows_NT)
+clean:
+	powershell.exe -NoProfile -Command "if (Test-Path -LiteralPath 'dist') { Remove-Item -LiteralPath 'dist' -Recurse -Force -ErrorAction Stop }; if (Test-Path -LiteralPath 'dockervc.exe') { Remove-Item -LiteralPath 'dockervc.exe' -Force -ErrorAction Stop }"
+else
 clean:
 	rm -rf dist dockervc
+endif

@@ -63,9 +63,22 @@ sudo ./install.sh          # or: ./install.sh --prefix ~/bin
 > On an Intel Mac or a Linux box, build from source instead — `go build .`
 > produces a binary for the machine you're on.
 
-### Uninstall (macOS)
+### Uninstall
 
-Run the uninstaller from the same extracted release folder (or grab
+On Windows, run the uninstaller from the extracted release folder. Pass the
+same `-InstallDir` used during installation if you chose a custom location:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\uninstall.ps1
+# or: powershell -ExecutionPolicy Bypass -File .\uninstall.ps1 -InstallDir C:\Tools\dockervc
+```
+
+It removes `dockervc.exe` and its user `PATH` entry, then asks whether to
+permanently delete the snapshot store. The safe default is to keep the store.
+If you used `--store` without setting `DOCKERVC_HOME`, identify that custom
+store with `-StoreDir <path>` so the uninstaller can offer to remove it.
+
+On macOS, run the uninstaller from the same extracted release folder (or grab
 `packaging/uninstall.sh` from the repo — it needs nothing next to it):
 
 ```sh
@@ -77,10 +90,6 @@ plus the `/usr/local/bin` default — and prints where your snapshot store
 lives (`~/.dockervc`, `/var/lib/dockervc`, or `$DOCKERVC_HOME`). The store
 itself is left alone: it holds your snapshots, so deleting it stays a
 decision you make by hand with `rm -rf`.
-
-On Windows, remove the installed `dockervc.exe` (or its install folder) and
-remove that folder from your user PATH. The snapshot store is deliberately
-left untouched at `%ProgramData%\dockervc` or your configured override.
 
 ## Quick start
 

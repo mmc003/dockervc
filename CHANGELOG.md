@@ -4,6 +4,18 @@ User-facing changes per version. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions match the
 [GitHub releases](https://github.com/mmc003/dockervc/releases).
 
+## v0.6.0 — 2026-09-16
+
+### Windows uninstaller
+
+- Windows release ZIPs now include `uninstall.ps1`. It removes the installed
+  executable and its user `PATH` entry, then asks whether to permanently
+  delete the snapshot store; declining or pressing Enter keeps snapshot data.
+- Custom install and store locations can be selected with `-InstallDir` and
+  `-StoreDir`.
+- `make clean` now uses PowerShell on Windows and removes the Windows
+  executable as well as the `dist` directory.
+
 ## v0.5.1 — 2026-09-14
 
 ### Uninstaller
