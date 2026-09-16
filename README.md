@@ -20,9 +20,20 @@ not committed). Other platforms can build from source with `go build .`.
 
 ### Windows (amd64)
 
-Download and extract `dockervc-<version>-windows-amd64.zip` from
-[Releases](../../releases). Open PowerShell inside the extracted
-`windows-amd64` folder, then run:
+After cloning the repository, build and install from source with one command
+from its root (Go must be on `PATH`):
+
+```powershell
+.\install.cmd
+```
+
+This creates the Windows release layout under `dist\windows-amd64`, then runs
+the per-user installer. Pass `-NoPath` to skip the PATH change or
+`-InstallDir <path>` to choose another location.
+
+Alternatively, download and extract a prebuilt
+`dockervc-<version>-windows-amd64.zip` from [Releases](../../releases). Open
+PowerShell inside the extracted `windows-amd64` folder, then run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1
