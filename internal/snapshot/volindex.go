@@ -34,6 +34,24 @@ type FileIndex struct {
 	Files map[string]FileMeta `json:"files"`
 }
 
+// EstimatedTarBytes approximates the raw tar size represented by this index.
+// Directory entries are not indexed and live contents may have changed, so
+// callers must label this as an estimate.
+func (idx *FileIndex) EstimatedTarBytes() int64 {
+	if idx == nil {
+		return 0
+	}
+	const block = int64(512)
+	total := int64(2 * block) // end-of-archive blocks
+	for _, meta := range idx.Files {
+		total += block
+		if meta.Type == "file" && meta.Size > 0 {
+			total += ((meta.Size + block - 1) / block) * block
+		}
+	}
+	return total
+}
+
 // NewFileIndex parses a tar stream — the exact bytes stored as the volume
 // blob — into a FileIndex.
 func NewFileIndex(r io.Reader) (*FileIndex, error) {

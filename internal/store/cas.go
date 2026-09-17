@@ -11,6 +11,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 
 	"dockervc/internal/model"
+	"dockervc/internal/progress"
 )
 
 // ObjectInfoResult reports what PutBlob did.
@@ -28,6 +29,13 @@ type ObjectInfoResult struct {
 // InsertSnapshot — never here, because the snapshot row must exist first
 // (foreign keys are enforced).
 func (s *Store) PutBlob(kind, imageKey string, r io.Reader) (ObjectInfoResult, error) {
+	return s.PutBlobTracked(kind, imageKey, r, nil, nil)
+}
+
+// PutBlobTracked is PutBlob with callbacks for uncompressed input bytes and
+// compressed stored bytes. Callbacks may be nil.
+func (s *Store) PutBlobTracked(kind, imageKey string, r io.Reader,
+	inputAdvance, storedAdvance func(int64)) (ObjectInfoResult, error) {
 	var res ObjectInfoResult
 	res.Kind = kind
 
@@ -44,12 +52,14 @@ func (s *Store) PutBlob(kind, imageKey string, r io.Reader) (ObjectInfoResult, e
 	// Hash the bytes as stored (compressed), so verification re-hashes the
 	// file on disk directly.
 	h := sha256.New()
-	zw, err := zstd.NewWriter(io.MultiWriter(tmp, h),
+	stored := &progress.CountingWriter{Writer: io.MultiWriter(tmp, h), Advance: storedAdvance}
+	zw, err := zstd.NewWriter(stored,
 		zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(s.zstdLevel)))
 	if err != nil {
 		return res, err
 	}
-	if _, err := io.Copy(zw, r); err != nil {
+	input := &progress.CountingReader{Reader: r, Advance: inputAdvance}
+	if _, err := io.Copy(zw, input); err != nil {
 		zw.Close()
 		return res, fmt.Errorf("read %s stream: %w", kind, err)
 	}
@@ -104,11 +114,19 @@ func (o *objectReader) Close() error {
 // OpenObject returns a zstd-decompressing reader over one stored object.
 // The caller must Close it.
 func (s *Store) OpenObject(hash string) (io.ReadCloser, error) {
+	return s.OpenObjectTracked(hash, nil)
+}
+
+// OpenObjectTracked is OpenObject with callbacks for compressed bytes read
+// from the CAS file. Counting below the decoder makes ObjectSize an exact
+// progress total even though callers consume decompressed bytes.
+func (s *Store) OpenObjectTracked(hash string, advance func(int64)) (io.ReadCloser, error) {
 	f, err := os.Open(s.ObjectPath(hash))
 	if err != nil {
 		return nil, err
 	}
-	zr, err := zstd.NewReader(f)
+	counted := &progress.CountingReader{Reader: f, Advance: advance}
+	zr, err := zstd.NewReader(counted)
 	if err != nil {
 		f.Close()
 		return nil, err

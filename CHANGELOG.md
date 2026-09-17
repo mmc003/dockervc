@@ -24,6 +24,15 @@ User-facing changes per version. Format loosely follows
 - `dockervc diff <snapshot> --files <volume>` now lists file-level changes
   between a stored snapshot and the live volume.
 
+### Live progress and ETA
+
+- Snapshot, export, rollback/restore, and deep live-volume scans now report
+  the current item, bytes, rate, and elapsed time on stderr. Export and restore
+  use exact stored-byte totals; snapshot and deep-status estimates are marked
+  `~ETA` when a previous snapshot provides a baseline.
+- Interactive terminals update progress in place, while redirected output is
+  plain and throttled. The global `--no-progress` flag suppresses it.
+
 ## v0.6.0 — 2026-09-16
 
 ### Windows uninstaller

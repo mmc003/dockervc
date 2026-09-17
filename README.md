@@ -160,6 +160,26 @@ Useful snapshot flags:
 | `--include-anonymous` | also capture anonymous volumes |
 | `--include-bind-mounts` | also archive host bind-mount paths (run on the Docker host) |
 
+## Progress, elapsed time, and ETA
+
+Long-running snapshot, export, restore, and deep-status streams report their
+current item, bytes, transfer rate, and elapsed time on stderr. Export and
+restore know their stored-byte totals and show `ETA`; snapshot and live-volume
+scans use the previous snapshot as a size baseline and mark estimates as
+`~ETA`. When no credible total exists, dockervc shows bytes/rate/elapsed without
+inventing an ETA.
+
+Interactive terminals update progress in place. Redirected output contains
+plain periodic lines with no ANSI control sequences. Pass the global
+`--no-progress` flag to suppress progress entirely:
+
+```sh
+dockervc --no-progress snapshot -m "quiet backup"
+```
+
+The full-screen TUI continues to show its existing `running: ...` indicator;
+live in-pane progress is deferred to a later TUI concurrency update.
+
 Snapshots whose object files went missing (or, per `--deep`, no longer hash
 right) are marked `✗ BROKEN` in `log`; `doctor --repair` offers to delete
 them, asking before each destructive step.
@@ -183,7 +203,7 @@ $ dockervc diff snap-A snap-B --files demo-data
   D  temp.txt           4 B
 
 $ dockervc status --deep --volumes demo-data
-scanning volume demo-data...
+scanning volume demo-data: elapsed 00:00 · ETA calculating…
 volumes:
   ~ demo-data (+1 created, ~2 modified, -1 deleted)
 

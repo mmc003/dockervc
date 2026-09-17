@@ -19,16 +19,17 @@ import (
 
 	"dockervc/internal/dockerapi"
 	"dockervc/internal/model"
+	"dockervc/internal/progress"
 	"dockervc/internal/store"
 )
 
 // Options controls one snapshot run.
 type Options struct {
-	Message            string
-	Stop               bool     // stop containers first (app-consistent)
-	Only               []string // subset of: containers, volumes, images, networks, bindmounts
-	IncludeAnonymous   bool     // include anonymous volumes (64-hex names)
-	IncludeBindMounts  bool     // tar host bind-mount paths
+	Message           string
+	Stop              bool     // stop containers first (app-consistent)
+	Only              []string // subset of: containers, volumes, images, networks, bindmounts
+	IncludeAnonymous  bool     // include anonymous volumes (64-hex names)
+	IncludeBindMounts bool     // tar host bind-mount paths
 }
 
 // scope returns true if the given entity kind should be captured.
@@ -46,18 +47,32 @@ func (o Options) scope(kind string) bool {
 
 // Capturer runs a snapshot.
 type Capturer struct {
-	Cli *dockerapi.Client
-	St  *store.Store
-	Opt Options
+	Cli      *dockerapi.Client
+	St       *store.Store
+	Opt      Options
+	Progress progress.Reporter
 
 	manifest *model.Manifest
 	warnings []string
+	meter    *progress.Meter
+	baseline *model.Manifest
 }
 
 // Run captures the engine state and persists the snapshot. On failure the
 // snapshot row is not written; any objects already stored are harmless and
 // will be reclaimed by prune.
-func (c *Capturer) Run(ctx context.Context) (*model.Manifest, error) {
+func (c *Capturer) Run(ctx context.Context) (result *model.Manifest, retErr error) {
+	c.meter = progress.NewMeter(c.Progress, "snapshot")
+	defer func() {
+		c.meter.Finish(retErr != nil)
+		c.meter = nil
+	}()
+	baseline, err := c.St.LatestSnapshot()
+	if err != nil {
+		return nil, fmt.Errorf("load snapshot size baseline: %w", err)
+	}
+	c.baseline = baseline
+
 	engineID, dockerVersion, err := c.Cli.EngineInfo(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("connect to docker engine: %w", err)
@@ -119,6 +134,7 @@ func (c *Capturer) Run(ctx context.Context) (*model.Manifest, error) {
 			return nil, fmt.Errorf("capture networks: %w", err)
 		}
 	}
+	c.meter.Phase("finalizing snapshot", "", 0, progress.TotalUnknown, 0)
 
 	for _, rec := range c.manifest.Images {
 		m.TotalSize += rec.Size
@@ -169,8 +185,9 @@ func (c *Capturer) captureContainers(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	for _, ct := range list {
+	for i, ct := range list {
 		name := strings.TrimPrefix(first(ct.Names), "/")
+		c.progressEntity("snapshotting container", name, c.estimateSize("container", name), i, len(list))
 		inspect, err := c.Cli.InspectContainer(ctx, ct.ID)
 		if err != nil {
 			return fmt.Errorf("inspect %s: %w", name, err)
@@ -206,7 +223,7 @@ func (c *Capturer) captureContainers(ctx context.Context) error {
 		if indexer != nil {
 			src = indexer.Reader()
 		}
-		obj, err := c.St.PutBlob("image", "", src)
+		obj, err := c.putBlobTracked("image", "", src)
 		stream.Close()
 		if indexer != nil {
 			if h, ferr := indexer.Finish(); ferr != nil {
@@ -263,6 +280,7 @@ func (c *Capturer) captureContainers(ctx context.Context) error {
 			note = "  (filesystem unchanged, reused)"
 		}
 		fmt.Printf("  container %-30s %s%s\n", name, HumanBytes(obj.Size), note)
+		c.finishProgressEntity(name, i+1, len(list), obj.Size)
 	}
 	return nil
 }
@@ -272,10 +290,14 @@ func (c *Capturer) captureVolumes(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	selected := vols[:0]
 	for _, v := range vols {
-		if !c.Opt.IncludeAnonymous && isAnonymousVolume(v.Name) {
-			continue
+		if c.Opt.IncludeAnonymous || !isAnonymousVolume(v.Name) {
+			selected = append(selected, v)
 		}
+	}
+	for i, v := range selected {
+		c.progressEntity("snapshotting volume", v.Name, c.estimateSize("volume", v.Name), i, len(selected))
 		if v.Driver != "local" {
 			c.warn("volume %s uses driver %q; captured via helper container, verify on restore", v.Name, v.Driver)
 		}
@@ -287,7 +309,7 @@ func (c *Capturer) captureVolumes(ctx context.Context) error {
 		// and therefore the CAS hash — are exactly what docker produced, and
 		// the file index falls out of the same stream at no extra I/O.
 		indexer := NewVolumeIndexer(stream)
-		obj, err := c.St.PutBlob("volume", "", indexer.Reader())
+		obj, err := c.putBlobTracked("volume", "", indexer.Reader())
 		stream.Close()
 		idx, idxErr := indexer.Finish() // reap the parser goroutine either way
 		if err != nil {
@@ -321,6 +343,7 @@ func (c *Capturer) captureVolumes(ctx context.Context) error {
 			files = fmt.Sprintf("  %d files", rec.Files)
 		}
 		fmt.Printf("  volume    %-30s %s%s\n", v.Name, HumanBytes(obj.Size), files)
+		c.finishProgressEntity(v.Name, i+1, len(selected), obj.Size)
 	}
 	return nil
 }
@@ -348,13 +371,14 @@ func (c *Capturer) captureBindMounts(ctx context.Context) error {
 		paths = append(paths, p)
 	}
 	sort.Strings(paths)
-	for _, p := range paths {
+	for i, p := range paths {
+		c.progressEntity("snapshotting bind mount", p, c.estimateSize("bindmount", p), i, len(paths))
 		stream, err := tarHostPath(p)
 		if err != nil {
 			c.warn("bind mount %s not captured: %v", p, err)
 			continue
 		}
-		obj, err := c.St.PutBlob("bindmount", "", stream)
+		obj, err := c.putBlobTracked("bindmount", "", stream)
 		stream.Close()
 		if err != nil {
 			return fmt.Errorf("store bind mount %s: %w", p, err)
@@ -364,6 +388,7 @@ func (c *Capturer) captureBindMounts(ctx context.Context) error {
 			HostPath: p, Object: obj.Hash, Size: obj.Size,
 		})
 		fmt.Printf("  bindmount %-30s %s\n", p, HumanBytes(obj.Size))
+		c.finishProgressEntity(p, i+1, len(paths), obj.Size)
 	}
 	return nil
 }
@@ -373,13 +398,14 @@ func (c *Capturer) captureImages(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	for _, img := range imgs {
+	for i, img := range imgs {
 		// Dedup key: repo digest if pushed/pulled, else local image ID.
 		key := img.ID
 		for _, d := range img.RepoDigests {
 			key = d
 			break
 		}
+		c.progressEntity("snapshotting image", key, c.estimateSize("image", key), i, len(imgs))
 		if existing, ok, err := c.St.ObjectByImageKey(key); err != nil {
 			return err
 		} else if ok {
@@ -389,6 +415,7 @@ func (c *Capturer) captureImages(ctx context.Context) error {
 				Refs: img.RepoTags, Digest: key, Object: existing.Hash, Size: existing.Size,
 			})
 			c.manifest.Stats.ReusedObjects++
+			c.finishProgressEntity(key+" (reused)", i+1, len(imgs), 0)
 			continue
 		}
 
@@ -401,7 +428,7 @@ func (c *Capturer) captureImages(ctx context.Context) error {
 			c.warn("image %s not captured: %v", ref, err)
 			continue
 		}
-		obj, err := c.St.PutBlob("image", key, stream)
+		obj, err := c.putBlobTracked("image", key, stream)
 		stream.Close()
 		if err != nil {
 			return fmt.Errorf("store image %s: %w", ref, err)
@@ -411,6 +438,7 @@ func (c *Capturer) captureImages(ctx context.Context) error {
 			Refs: img.RepoTags, Digest: key, Object: obj.Hash, Size: obj.Size,
 		})
 		fmt.Printf("  image     %-30s %s\n", ref, HumanBytes(obj.Size))
+		c.finishProgressEntity(key, i+1, len(imgs), obj.Size)
 	}
 	return nil
 }
@@ -420,10 +448,14 @@ func (c *Capturer) captureNetworks(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	selected := nets[:0]
 	for _, n := range nets {
-		if isBuiltinNetwork(n.Name) {
-			continue
+		if !isBuiltinNetwork(n.Name) {
+			selected = append(selected, n)
 		}
+	}
+	for i, n := range selected {
+		c.progressEntity("capturing network", n.Name, 0, i, len(selected))
 		inspect, err := c.Cli.InspectNetwork(ctx, n.Name)
 		if err != nil {
 			return fmt.Errorf("inspect network %s: %w", n.Name, err)
@@ -436,6 +468,7 @@ func (c *Capturer) captureNetworks(ctx context.Context) error {
 			Name: n.Name, InspectJSON: raw,
 		})
 		fmt.Printf("  network   %-30s (config)\n", n.Name)
+		c.finishProgressEntity(n.Name, i+1, len(selected), 0)
 	}
 	return nil
 }
@@ -448,6 +481,69 @@ func (c *Capturer) accountObject(obj store.ObjectInfoResult) {
 	} else {
 		c.manifest.Stats.ReusedObjects++
 	}
+}
+
+func (c *Capturer) putBlobTracked(kind, imageKey string, r io.Reader) (store.ObjectInfoResult, error) {
+	var storedAdvance func(int64)
+	if c.meter != nil {
+		storedAdvance = c.meter.AddBytes
+	}
+	return c.St.PutBlobTracked(kind, imageKey, r, nil, storedAdvance)
+}
+
+func (c *Capturer) progressEntity(phase, name string, estimate int64, done, total int) {
+	if c.meter == nil {
+		return
+	}
+	kind := progress.TotalUnknown
+	if estimate > 0 {
+		kind = progress.TotalEstimated
+	}
+	c.meter.Phase(phase, name, estimate, kind, total)
+	c.meter.Item(name, done, total)
+}
+
+func (c *Capturer) finishProgressEntity(name string, done, total int, actual int64) {
+	if c.meter == nil {
+		return
+	}
+	if actual > 0 {
+		c.meter.SetBytes(actual, actual, progress.TotalExact)
+	}
+	c.meter.Item(name, done, total)
+}
+
+func (c *Capturer) estimateSize(kind, name string) int64 {
+	if c.baseline == nil {
+		return 0
+	}
+	switch kind {
+	case "container":
+		for _, rec := range c.baseline.Containers {
+			if rec.Name == name {
+				return rec.Size
+			}
+		}
+	case "volume":
+		for _, rec := range c.baseline.Volumes {
+			if rec.Name == name {
+				return rec.Size
+			}
+		}
+	case "image":
+		for _, rec := range c.baseline.Images {
+			if rec.Digest == name {
+				return rec.Size
+			}
+		}
+	case "bindmount":
+		for _, rec := range c.baseline.BindMounts {
+			if rec.HostPath == name {
+				return rec.Size
+			}
+		}
+	}
+	return 0
 }
 
 // newSnapshotID yields sortable, human-friendly IDs:

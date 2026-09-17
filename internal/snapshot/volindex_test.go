@@ -63,6 +63,20 @@ func TestNewFileIndex(t *testing.T) {
 	}
 }
 
+func TestEstimatedTarBytes(t *testing.T) {
+	idx := &FileIndex{Files: map[string]FileMeta{
+		"small": {Type: "file", Size: 1},
+		"large": {Type: "file", Size: 513},
+		"link":  {Type: "symlink", Link: "small"},
+	}}
+	// Two end blocks + three headers + 1 padded data block + 2 padded
+	// data blocks.
+	want := int64(8 * 512)
+	if got := idx.EstimatedTarBytes(); got != want {
+		t.Fatalf("EstimatedTarBytes = %d, want %d", got, want)
+	}
+}
+
 func TestVolumeIndexerPassthrough(t *testing.T) {
 	raw := buildTar(t, map[string]string{"a": "aaa", "b": "bbb"})
 	indexer := NewVolumeIndexer(bytes.NewReader(raw))

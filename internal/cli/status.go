@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"sort"
 	"strings"
 
@@ -12,6 +11,7 @@ import (
 
 	"dockervc/internal/dockerapi"
 	"dockervc/internal/model"
+	"dockervc/internal/progress"
 	"dockervc/internal/snapshot"
 )
 
@@ -51,7 +51,7 @@ var statusCmd = &cobra.Command{
 		var deepErr error
 		if statusOpts.deep {
 			deepErr = addLiveVolumeDrift(cmd.Context(), cli.VolumeTarStream, latest,
-				drift, statusOpts.volumes, st.OpenObject, cmd.ErrOrStderr())
+				drift, statusOpts.volumes, st.OpenObject, commandProgress(cmd.ErrOrStderr()))
 		}
 		printDrift(drift)
 		return deepErr
@@ -83,7 +83,8 @@ var diffCmd = &cobra.Command{
 			if err != nil {
 				return err
 			}
-			return printLiveVolumeFileDiff(cmd.Context(), cli, a, diffFiles, cmd.ErrOrStderr())
+			return printLiveVolumeFileDiff(cmd.Context(), cli, a, diffFiles,
+				commandProgress(cmd.ErrOrStderr()))
 		}
 
 		var drift *snapshot.Drift
@@ -140,7 +141,7 @@ func printDrift(d *snapshot.Drift) {
 // joins scan errors so one failure does not hide later results.
 func addLiveVolumeDrift(ctx context.Context, openTar snapshot.VolumeTarOpener,
 	m *model.Manifest, drift *snapshot.Drift, selected []string,
-	openBlob snapshot.BlobOpener, progress io.Writer) error {
+	openBlob snapshot.BlobOpener, reporter progress.Reporter) error {
 
 	records := make(map[string]model.VolumeRecord, len(m.Volumes))
 	for _, rec := range m.Volumes {
@@ -195,8 +196,7 @@ func addLiveVolumeDrift(ctx context.Context, openTar snapshot.VolumeTarOpener,
 				name+" (file comparison unavailable; take a new snapshot)")
 			continue
 		}
-		fmt.Fprintf(progress, "scanning volume %s...\n", name)
-		fc, _, _, err := snapshot.DiffLiveVolume(ctx, openTar, openBlob, rec)
+		fc, _, _, err := snapshot.DiffLiveVolumeTracked(ctx, openTar, openBlob, rec, reporter)
 		if err != nil {
 			drift.Volumes.Unavailable = append(drift.Volumes.Unavailable,
 				fmt.Sprintf("%s (scan failed: %v)", name, err))
@@ -315,7 +315,7 @@ func printVolumeFileDiff(a, b *model.Manifest, vol string) error {
 // printLiveVolumeFileDiff lists path-level changes between a snapshot and one
 // live volume. Added/deleted volumes are rendered as all-A/all-D respectively.
 func printLiveVolumeFileDiff(ctx context.Context, cli *dockerapi.Client,
-	a *model.Manifest, vol string, progress io.Writer) error {
+	a *model.Manifest, vol string, reporter progress.Reporter) error {
 
 	recA, inA := findVolume(a, vol)
 	vols, err := cli.ListVolumes(ctx)
@@ -346,8 +346,8 @@ func printLiveVolumeFileDiff(ctx context.Context, cli *dockerapi.Client,
 			printFileIndexUnavailable()
 			return nil
 		}
-		fmt.Fprintf(progress, "scanning volume %s...\n", vol)
-		live, err = snapshot.IndexLiveVolume(ctx, cli.VolumeTarStream, vol)
+		_, _, live, err = snapshot.DiffLiveVolumeTracked(ctx, cli.VolumeTarStream,
+			st.OpenObject, recA, reporter)
 		if err != nil {
 			return err
 		}
@@ -367,8 +367,10 @@ func printLiveVolumeFileDiff(ctx context.Context, cli *dockerapi.Client,
 		}
 	case inLive:
 		fmt.Printf("volume %s was created in the live engine — all its files:\n\n", vol)
-		fmt.Fprintf(progress, "scanning volume %s...\n", vol)
-		live, err = snapshot.IndexLiveVolume(ctx, cli.VolumeTarStream, vol)
+		meter := progress.NewMeter(reporter, "deep status")
+		meter.Phase("scanning volume", vol, 0, progress.TotalUnknown, 1)
+		live, err = snapshot.IndexLiveVolumeTracked(ctx, cli.VolumeTarStream, vol, meter.AddBytes)
+		meter.Finish(err != nil)
 		if err != nil {
 			return err
 		}

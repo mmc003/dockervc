@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"dockervc/internal/model"
+	"dockervc/internal/progress"
 	"dockervc/internal/snapshot"
 )
 
@@ -58,7 +59,7 @@ func TestAddLiveVolumeDrift(t *testing.T) {
 		},
 		Images: snapshot.DriftSection{Kind: "images"},
 	}
-	var progress bytes.Buffer
+	var progressEvents []progress.Event
 	var scanned []string
 	err := addLiveVolumeDrift(
 		context.Background(),
@@ -72,7 +73,9 @@ func TestAddLiveVolumeDrift(t *testing.T) {
 		func(string) (io.ReadCloser, error) {
 			return io.NopCloser(bytes.NewReader(index)), nil
 		},
-		&progress,
+		progress.ReporterFunc(func(event progress.Event) {
+			progressEvents = append(progressEvents, event)
+		}),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -86,8 +89,14 @@ func TestAddLiveVolumeDrift(t *testing.T) {
 	if got := drift.Volumes.Unavailable; len(got) != 1 || !strings.HasPrefix(got[0], "legacy ") {
 		t.Fatalf("unavailable = %v", got)
 	}
-	if got := progress.String(); got != "scanning volume common...\n" {
-		t.Fatalf("progress = %q", got)
+	foundScan := false
+	for _, event := range progressEvents {
+		if event.Phase == "scanning volume" && event.Item == "common" {
+			foundScan = true
+		}
+	}
+	if !foundScan {
+		t.Fatalf("progress events = %+v", progressEvents)
 	}
 }
 
@@ -109,7 +118,7 @@ func TestAddLiveVolumeDriftContinuesAfterFailure(t *testing.T) {
 		},
 		m, drift, nil,
 		func(string) (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(index)), nil },
-		io.Discard,
+		progress.Nop(),
 	)
 	if err == nil || !errors.Is(err, boom) {
 		t.Fatalf("error = %v, want scan failure", err)
@@ -130,7 +139,7 @@ func TestAddLiveVolumeDriftRejectsUnknownFilter(t *testing.T) {
 			t.Fatal("unknown filter must fail before scanning")
 			return nil, nil
 		},
-		&model.Manifest{}, drift, []string{"missing"}, nil, io.Discard,
+		&model.Manifest{}, drift, []string{"missing"}, nil, progress.Nop(),
 	)
 	if err == nil || !strings.Contains(err.Error(), "missing") {
 		t.Fatalf("error = %v", err)
@@ -153,7 +162,7 @@ func TestAddLiveVolumeDriftScansOnlySelectedVolumes(t *testing.T) {
 		},
 		m, drift, []string{"selected"},
 		func(string) (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(index)), nil },
-		io.Discard,
+		progress.Nop(),
 	)
 	if err != nil {
 		t.Fatal(err)

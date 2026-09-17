@@ -121,7 +121,7 @@ the imported snapshot (one confirmation, pre-apply checkpoint by default).`,
 		// Pre-apply checkpoint: identical guarantee to rollback's — the
 		// restore itself is reversible. A failed checkpoint aborts.
 		cap := &snapshot.Capturer{
-			Cli: dcli, St: st,
+			Cli: dcli, St: st, Progress: commandProgress(cmd.ErrOrStderr()),
 			Opt: snapshot.Options{Message: "pre-apply checkpoint before imported " + m.ID},
 		}
 		cp, err := cap.Run(ctx)
@@ -143,7 +143,10 @@ the imported snapshot (one confirmation, pre-apply checkpoint by default).`,
 			return nil
 		}
 
-		ex := &rollback.Executor{Cli: dcli, St: st, Out: os.Stdout}
+		ex := &rollback.Executor{
+			Cli: dcli, St: st, Out: os.Stdout,
+			Progress: commandProgress(cmd.ErrOrStderr()),
+		}
 		if err := ex.Apply(ctx, plan); err != nil {
 			printRollbackWarnings(cmd, plan)
 			return err

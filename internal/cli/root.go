@@ -13,9 +13,10 @@ import (
 
 // st is the shared, lazily opened store handle for commands that need one.
 var (
-	storePath string
-	st        *store.Store
-	forceYes  bool
+	storePath  string
+	st         *store.Store
+	forceYes   bool
+	noProgress bool
 )
 
 // needsStore marks commands that operate on an existing store.
@@ -56,6 +57,8 @@ snapshots stored entirely on this machine.`,
 func Execute() error {
 	rootCmd.PersistentFlags().StringVar(&storePath, "store", store.DefaultPath(),
 		"store path (overrides $DOCKERVC_HOME)")
+	rootCmd.PersistentFlags().BoolVar(&noProgress, "no-progress", false,
+		"disable live progress output")
 	return rootCmd.Execute()
 }
 

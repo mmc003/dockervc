@@ -88,7 +88,7 @@ taken first, so the rollback itself can be rolled back.`,
 		// be the one truly destructive thing this command can do.
 		if !rollbackOpts.keepCurrent {
 			cap := &snapshot.Capturer{
-				Cli: dcli, St: st,
+				Cli: dcli, St: st, Progress: commandProgress(cmd.ErrOrStderr()),
 				Opt: snapshot.Options{Message: "pre-rollback checkpoint before " + m.ID},
 			}
 			cp, err := cap.Run(ctx)
@@ -108,7 +108,10 @@ taken first, so the rollback itself can be rolled back.`,
 			return nil
 		}
 
-		ex := &rollback.Executor{Cli: dcli, St: st, Out: os.Stdout}
+		ex := &rollback.Executor{
+			Cli: dcli, St: st, Out: os.Stdout,
+			Progress: commandProgress(cmd.ErrOrStderr()),
+		}
 		if err := ex.Apply(ctx, plan); err != nil {
 			printRollbackWarnings(cmd, plan)
 			return err

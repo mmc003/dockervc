@@ -128,12 +128,8 @@ lands in an exports/ folder in the current directory (created on demand) as
 			os.Remove(tmpName)
 		}
 		exp := &portable.Exporter{
-			St: st,
-			Progress: func(done, totalObj int, hash string, bytes int64) {
-				if done == totalObj || done%10 == 1 {
-					fmt.Printf("  exporting object %d/%d (%s)…\n", done, totalObj, snapshot.HumanBytes(bytes))
-				}
-			},
+			St:       st,
+			Reporter: commandProgress(cmd.ErrOrStderr()),
 		}
 		if err := exp.Export(m, tmp); err != nil {
 			cleanup()

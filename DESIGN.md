@@ -168,6 +168,9 @@ dockervc doctor                  [--deep]         # structural health check (ins
                                                   # integrity) — `verify` is a deprecated
                                                   # alias for it
 dockervc config   [key value]                     # store path, retention, zstd level…
+
+# Global: --no-progress suppresses stderr progress. Export/restore use exact
+# stored-byte ETA; snapshot/deep-status estimates are marked ~ETA.
 dockervc version                                  # build version
 ```
 

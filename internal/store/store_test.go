@@ -1,6 +1,7 @@
 package store
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,37 @@ import (
 
 	"dockervc/internal/model"
 )
+
+func TestTrackedBlobIOReportsExactBytes(t *testing.T) {
+	s := newTestStore(t)
+	payload := strings.Repeat("compressible-data-", 2048)
+	var inputBytes, storedBytes int64
+	res, err := s.PutBlobTracked("volume", "", strings.NewReader(payload),
+		func(n int64) { inputBytes += n }, func(n int64) { storedBytes += n })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inputBytes != int64(len(payload)) {
+		t.Fatalf("input bytes = %d, want %d", inputBytes, len(payload))
+	}
+	if storedBytes != res.Size {
+		t.Fatalf("stored bytes = %d, object size = %d", storedBytes, res.Size)
+	}
+
+	var readBytes int64
+	r, err := s.OpenObjectTracked(res.Hash, func(n int64) { readBytes += n })
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(r)
+	r.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != payload || readBytes != res.Size {
+		t.Fatalf("round trip bytes=%d/%d content match=%v", readBytes, res.Size, string(got) == payload)
+	}
+}
 
 func newTestStore(t *testing.T) *Store {
 	t.Helper()

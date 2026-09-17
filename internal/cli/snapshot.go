@@ -46,8 +46,9 @@ var snapshotCmd = &cobra.Command{
 		}
 
 		capturer := &snapshot.Capturer{
-			Cli: cli,
-			St:  st,
+			Cli:      cli,
+			St:       st,
+			Progress: commandProgress(cmd.ErrOrStderr()),
 			Opt: snapshot.Options{
 				Message:           snapOpts.message,
 				Stop:              snapOpts.stop,

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"dockervc/internal/model"
+	"dockervc/internal/progress"
 	"dockervc/internal/store"
 )
 
@@ -32,8 +33,12 @@ const (
 // Exporter writes a manifest and its objects as a .dvca archive.
 type Exporter struct {
 	St *store.Store
+	// Reporter receives byte-level progress for the deterministic object-copy
+	// phase. Nil is silent.
+	Reporter progress.Reporter
 	// Progress is called after each object is written (nil = silent); the
-	// caller decides how often to print.
+	// caller decides how often to print. Kept for compatibility with existing
+	// callers; new frontends should use Reporter.
 	Progress func(done, total int, lastHash string, bytes int64)
 }
 
@@ -45,7 +50,7 @@ type Exporter struct {
 // checksums.sha256 last. Objects are the ObjectPath FILE bytes, verbatim —
 // OpenObject returns a decompressing reader and would silently change every
 // hash.
-func (e *Exporter) Export(m *model.Manifest, w io.Writer) error {
+func (e *Exporter) Export(m *model.Manifest, w io.Writer) (retErr error) {
 	hashes := sortedObjectHashes(m)
 
 	sizes := make(map[string]int64, len(hashes))
@@ -56,6 +61,12 @@ func (e *Exporter) Export(m *model.Manifest, w io.Writer) error {
 		}
 		sizes[h] = fi.Size()
 	}
+	var totalBytes int64
+	for _, size := range sizes {
+		totalBytes += size
+	}
+	meter := progress.NewMeter(e.Reporter, "export")
+	defer func() { meter.Finish(retErr != nil) }()
 
 	// json.Marshal of the decoded manifest is byte-stable, so this is the
 	// same blob db.InsertSnapshot stored — and the same bytes Register will
@@ -85,10 +96,13 @@ func (e *Exporter) Export(m *model.Manifest, w io.Writer) error {
 	}
 
 	buf := make([]byte, 32*1024) // one buffer for all objects — none held whole
+	meter.Phase("writing objects", "", totalBytes, progress.TotalExact, len(hashes))
 	for i, h := range hashes {
-		if err := e.writeObject(tw, h, sizes[h], m.CreatedAt, buf); err != nil {
+		meter.Item(shortHash(h), i, len(hashes))
+		if err := e.writeObject(tw, h, sizes[h], m.CreatedAt, buf, meter.AddBytes); err != nil {
 			return err
 		}
+		meter.Item(shortHash(h), i+1, len(hashes))
 		if e.Progress != nil {
 			e.Progress(i+1, len(hashes), h, sizes[h])
 		}
@@ -112,13 +126,15 @@ func (e *Exporter) Export(m *model.Manifest, w io.Writer) error {
 		return err
 	}
 
+	meter.Phase("finalizing archive", "", 0, progress.TotalUnknown, 0)
 	return tw.Close()
 }
 
 // writeObject streams one stored object file into the tar. The file — not
 // OpenObject — is the source: stored (compressed) bytes are what the hash
 // names.
-func (e *Exporter) writeObject(tw *tar.Writer, hash string, size int64, modTime time.Time, buf []byte) error {
+func (e *Exporter) writeObject(tw *tar.Writer, hash string, size int64, modTime time.Time,
+	buf []byte, advance func(int64)) error {
 	f, err := os.Open(e.St.ObjectPath(hash))
 	if err != nil {
 		return err
@@ -144,8 +160,16 @@ func (e *Exporter) writeObject(tw *tar.Writer, hash string, size int64, modTime 
 	}); err != nil {
 		return err
 	}
-	_, err = io.CopyBuffer(tw, f, buf)
+	counted := &progress.CountingReader{Reader: f, Advance: advance}
+	_, err = io.CopyBuffer(tw, counted, buf)
 	return err
+}
+
+func shortHash(hash string) string {
+	if len(hash) <= 12 {
+		return hash
+	}
+	return hash[:12]
 }
 
 // sortedObjectHashes returns the manifest's referenced hashes sorted and

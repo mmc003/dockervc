@@ -57,6 +57,12 @@ func TestExportImportViaRunArgs(t *testing.T) {
 	if !strings.Contains(out, "Exported snap-20260912-130000-cli1") {
 		t.Fatalf("export output = %q", out)
 	}
+	if !strings.Contains(out, "writing objects") {
+		t.Fatalf("export progress missing: %q", out)
+	}
+	if strings.Contains(out, "\x1b[") || strings.Contains(out, "\r") {
+		t.Fatalf("captured export output contains terminal controls: %q", out)
+	}
 	if fi, err := os.Stat(archive); err != nil || fi.Size() == 0 {
 		t.Fatalf("archive not written: %v", err)
 	}

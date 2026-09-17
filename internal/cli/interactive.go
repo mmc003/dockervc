@@ -168,6 +168,7 @@ func resetCommandFlags() {
 		bindMounts bool
 	}{}
 	forceYes = false
+	noProgress = false
 	statusOpts = struct {
 		deep    bool
 		volumes []string

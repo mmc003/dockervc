@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"dockervc/internal/model"
+	"dockervc/internal/progress"
 	"dockervc/internal/store"
 )
 
@@ -210,5 +211,41 @@ func TestExportProgressReportsObjects(t *testing.T) {
 		if lastHashes[i] != h {
 			t.Fatalf("progress order: hash %d = %s, want %s", i, lastHashes[i], h)
 		}
+	}
+}
+
+func TestExportReporterCountsExactStoredBytes(t *testing.T) {
+	s, m := newFixtureStore(t)
+	var events []progress.Event
+	err := (&Exporter{
+		St: s,
+		Reporter: progress.ReporterFunc(func(e progress.Event) {
+			events = append(events, e)
+		}),
+	}).Export(m, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var total int64
+	for _, hash := range sortedObjectHashes(m) {
+		size, err := s.ObjectSize(hash)
+		if err != nil {
+			t.Fatal(err)
+		}
+		total += size
+	}
+	var writing progress.Event
+	for _, event := range events {
+		if event.Phase == "writing objects" && event.BytesDone >= writing.BytesDone {
+			writing = event
+		}
+	}
+	if writing.BytesDone != total || writing.BytesTotal != total || writing.TotalKind != progress.TotalExact {
+		t.Fatalf("writing event = %+v, want exact %d bytes", writing, total)
+	}
+	last := events[len(events)-1]
+	if !last.Finished || last.Failed {
+		t.Fatalf("final event = %+v", last)
 	}
 }
