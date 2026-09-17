@@ -14,15 +14,16 @@ import (
 // DriftSection groups one kind of difference between a snapshot and the
 // live engine.
 type DriftSection struct {
-	Kind    string
-	Added   []string
-	Removed []string
-	Changed []string // name: reason
+	Kind        string
+	Added       []string
+	Removed     []string
+	Changed     []string // name: reason
+	Unavailable []string // name: reason the comparison could not be completed
 }
 
 // Empty reports whether nothing drifted in this section.
 func (d DriftSection) Empty() bool {
-	return len(d.Added) == 0 && len(d.Removed) == 0 && len(d.Changed) == 0
+	return len(d.Added) == 0 && len(d.Removed) == 0 && len(d.Changed) == 0 && len(d.Unavailable) == 0
 }
 
 // Drift is the full comparison of a snapshot against the live engine.
@@ -161,6 +162,7 @@ func sortDrift(s DriftSection) {
 	sort.Strings(s.Added)
 	sort.Strings(s.Removed)
 	sort.Strings(s.Changed)
+	sort.Strings(s.Unavailable)
 }
 
 // DiffManifests compares two snapshots: entries present in B but not A are

@@ -53,7 +53,7 @@ type action struct {
 }
 
 var menuActions = []action{
-	{"status", "", "what changed since the last snapshot?", nil},
+	{"status", "[--deep --volumes names]", "what changed since the last snapshot?", guidedStatus},
 	{"snapshot", "-m <msg> [--stop]", "capture the current engine state", guidedSnapshot},
 	{"log", "", "list snapshots", nil},
 	{"show", "<snap>", "inspect one snapshot", guidedShow},
@@ -168,6 +168,10 @@ func resetCommandFlags() {
 		bindMounts bool
 	}{}
 	forceYes = false
+	statusOpts = struct {
+		deep    bool
+		volumes []string
+	}{}
 	diffFiles = ""
 	doctorRepair = false
 	doctorDeep = false

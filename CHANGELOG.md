@@ -14,6 +14,16 @@ User-facing changes per version. Format loosely follows
   reclaimable after `delete` plus `prune`, and bytes shared with other
   snapshots. Duplicate references within one snapshot are counted once.
 
+### Deep live volume status
+
+- `dockervc status --deep` now mounts snapshotted live volumes read-only and
+  reports created, modified, and deleted file counts without creating a new
+  snapshot or writing temporary objects to the store. `--volumes` limits the
+  scan to selected volume names. The interactive `dockervc cli` Status flow
+  provides the same choice through a volume checklist.
+- `dockervc diff <snapshot> --files <volume>` now lists file-level changes
+  between a stored snapshot and the live volume.
+
 ## v0.6.0 — 2026-09-16
 
 ### Windows uninstaller

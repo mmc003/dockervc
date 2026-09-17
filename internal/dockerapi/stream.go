@@ -97,13 +97,13 @@ func (c *Client) VolumeTarStream(ctx context.Context, volumeName string) (io.Rea
 
 	hc, err := c.c.ContainerCreate(ctx,
 		&container.Config{
-			Image:            helper,
-			Cmd:              []string{"tar", "cf", "-", "-C", "/src", "."},
-			NetworkDisabled:  true,
-			Labels:           map[string]string{"dockervc": "helper"},
+			Image:           helper,
+			Cmd:             []string{"tar", "cf", "-", "-C", "/src", "."},
+			NetworkDisabled: true,
+			Labels:          map[string]string{"dockervc": "helper"},
 		},
 		&container.HostConfig{
-			Binds:   []string{volumeName + ":/src:ro"},
+			Binds:      []string{volumeName + ":/src:ro"},
 			AutoRemove: false,
 		},
 		nil, nil, name)
@@ -124,6 +124,7 @@ func (c *Client) VolumeTarStream(ctx context.Context, volumeName string) (io.Rea
 		c.c.ContainerRemove(ctx, hc.ID, container.RemoveOptions{Force: true})
 		return nil, fmt.Errorf("start tar helper: %w", err)
 	}
+	waitOK, waitErr := c.c.ContainerWait(context.Background(), hc.ID, container.WaitConditionNotRunning)
 
 	pr, pw := io.Pipe()
 	var errBuf bytes.Buffer
@@ -133,7 +134,23 @@ func (c *Client) VolumeTarStream(ctx context.Context, volumeName string) (io.Rea
 		attach.Close()
 		if copyErr != nil {
 			pw.CloseWithError(fmt.Errorf("tar helper stream: %w (helper stderr: %s)", copyErr, strings.TrimSpace(errBuf.String())))
-		} else {
+			return
+		}
+		select {
+		case err := <-waitErr:
+			pw.CloseWithError(fmt.Errorf("wait for tar helper: %w", err))
+		case status := <-waitOK:
+			if status.StatusCode != 0 {
+				detail := strings.TrimSpace(errBuf.String())
+				if detail == "" && status.Error != nil {
+					detail = status.Error.Message
+				}
+				if detail == "" {
+					detail = "no diagnostics"
+				}
+				pw.CloseWithError(fmt.Errorf("tar helper exited with status %d: %s", status.StatusCode, detail))
+				return
+			}
 			pw.CloseWithError(nil)
 		}
 	}()
@@ -150,7 +167,7 @@ func (c *Client) VolumeTarStream(ctx context.Context, volumeName string) (io.Rea
 // tarValidatingReader fails fast (before the CAS commits anything) if the
 // stream does not look like a tar archive — e.g. the helper's tar errored.
 type tarValidatingReader struct {
-	r    io.Reader
+	r       io.Reader
 	checked bool
 }
 

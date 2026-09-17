@@ -485,6 +485,8 @@ func (t *tui) runMenuAction(i int) {
 		return
 	}
 	switch menuActions[i].name {
+	case "status":
+		t.askStatus()
 	case "snapshot":
 		t.askText("snapshot message", "interactive snapshot", func(val string, ok bool) {
 			if !ok {

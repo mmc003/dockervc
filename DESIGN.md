@@ -124,6 +124,7 @@ snapshot (via `refs`).
 ```
 dockervc init                                     # create + lock store, record engine id
 dockervc status                                   # engine state vs. last snapshot (drift report)
+                [--deep] [--volumes pgdata,redis] # hash selected live volume files; no store writes
 dockervc cli                                      # full-screen interactive menu (TUI)
                                                   #   ':' command line (also over output panes),
                                                   #   Tab-completes snapshot ids, double-Esc quits
@@ -138,7 +139,8 @@ dockervc log                                      # list snapshots (id, date, ms
 dockervc show     <snap>                          # contents of one snapshot
 dockervc diff     <snapA> [<snapB>]               # compare (snapB defaults to live engine);
                   [--files <volume>]              #   volumes show +created/~modified/-deleted counts,
-                                                  #   --files lists the individual files
+                                                  #   --files lists individual files, including
+                                                  #   snapshot-to-live when snapB is omitted
 dockervc delete   <snap> [--yes]                  # drop snapshot (objects GC'd on prune)
 
 # ── Rollback ────────────────────────────────────────────────────────────────────

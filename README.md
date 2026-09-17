@@ -110,6 +110,7 @@ dockervc snapshot -m "baseline"   # capture everything now
 dockervc log                      # list snapshots
 dockervc show snap-...            # inspect one snapshot
 dockervc status                   # what changed since the last snapshot?
+dockervc status --deep            # also hash and compare live volume files
 dockervc doctor                   # instant health check (missing files, broken snapshots)
 dockervc doctor --deep            # also re-hash every object (catches corruption)
 dockervc doctor --repair          # interactively fix what it finds
@@ -180,10 +181,28 @@ $ dockervc diff snap-A snap-B --files demo-data
   M  log.txt      36.5 KiB
   M  notes.txt          3 B
   D  temp.txt           4 B
+
+$ dockervc status --deep --volumes demo-data
+scanning volume demo-data...
+volumes:
+  ~ demo-data (+1 created, ~2 modified, -1 deleted)
+
+$ dockervc diff snap-A --files demo-data
+volume demo-data, snap-A → live:
+
+  M  log.txt      36.5 KiB
 ```
 
 Snapshots taken before file indexing existed fall back to a plain
 "content changed" note; take a fresh snapshot to start collecting indexes.
+Plain `status` stays fast and compares volume names only. `status --deep`
+mounts matching live volumes read-only, hashes their files, and discards the
+temporary indexes without writing a snapshot or CAS objects. Use `--volumes`
+to limit the scan. Like a normal snapshot without `--stop`, the result is
+crash-consistent when applications write during the scan.
+
+In `dockervc cli`, choose **Status**, enable the deep scan, then select one or
+more volumes from the checklist (press `a` to select all).
 
 ## Where data lives
 
