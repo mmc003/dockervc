@@ -137,6 +137,91 @@ func TestSnapshotRefsAndPrune(t *testing.T) {
 	}
 }
 
+func TestSnapshotStorageInfo(t *testing.T) {
+	s := newTestStore(t)
+
+	shared, err := s.PutBlob("volume", "", strings.NewReader("shared"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	onlyA, err := s.PutBlob("volume", "", strings.NewReader("only-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	onlyB, err := s.PutBlob("volume", "", strings.NewReader("only-b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// snap-a references shared twice through different entity records. The
+	// refs primary key must collapse that to one physical object.
+	a := &model.Manifest{
+		ID: "snap-a",
+		Volumes: []model.VolumeRecord{
+			{Name: "shared", Object: shared.Hash},
+			{Name: "only-a", Object: onlyA.Hash},
+		},
+		Images: []model.ImageRecord{{Digest: "duplicate", Object: shared.Hash}},
+	}
+	b := &model.Manifest{
+		ID: "snap-b",
+		Volumes: []model.VolumeRecord{
+			{Name: "shared", Object: shared.Hash},
+			{Name: "only-b", Object: onlyB.Hash},
+		},
+	}
+	if err := s.InsertSnapshot(a); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.InsertSnapshot(b); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.SnapshotStorageInfo("snap-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := SnapshotStorage{
+		ReferencedObjects: 2,
+		ReferencedBytes:   shared.Size + onlyA.Size,
+		ExclusiveObjects:  1,
+		ExclusiveBytes:    onlyA.Size,
+		SharedObjects:     1,
+		SharedBytes:       shared.Size,
+	}
+	if got != want {
+		t.Fatalf("SnapshotStorageInfo = %+v, want %+v", got, want)
+	}
+	if err := s.DeleteSnapshot("snap-b"); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.SnapshotStorageInfo("snap-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = SnapshotStorage{
+		ReferencedObjects: 2,
+		ReferencedBytes:   shared.Size + onlyA.Size,
+		ExclusiveObjects:  2,
+		ExclusiveBytes:    shared.Size + onlyA.Size,
+	}
+	if got != want {
+		t.Fatalf("storage after deleting sharing snapshot = %+v, want %+v", got, want)
+	}
+
+	empty := &model.Manifest{ID: "snap-empty"}
+	if err := s.InsertSnapshot(empty); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.SnapshotStorageInfo(empty.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != (SnapshotStorage{}) {
+		t.Fatalf("empty snapshot storage = %+v, want zero", got)
+	}
+}
+
 func TestGetSnapshotByPrefix(t *testing.T) {
 	s := newTestStore(t)
 	mk := func(id string) *model.Manifest {

@@ -115,13 +115,24 @@ var showCmd = &cobra.Command{
 		if m.Consistent {
 			consistent = "app-consistent (containers stopped)"
 		}
+		storageInfo, err := st.SnapshotStorageInfo(m.ID)
+		if err != nil {
+			return fmt.Errorf("calculate snapshot storage: %w", err)
+		}
 		fmt.Printf("snapshot %s\n", m.ID)
 		fmt.Printf("  created:        %s\n", m.CreatedAt.Local().Format(time.RFC1123))
 		fmt.Printf("  message:        %s\n", m.Message)
 		fmt.Printf("  engine:         docker %s (engine %s)\n", m.DockerVersion, shortID(m.EngineID))
 		fmt.Printf("  consistency:    %s\n", consistent)
-		fmt.Printf("  stored size:    %s (%d new / %d reused objects)\n",
-			snapshot.HumanBytes(m.TotalSize), m.Stats.NewObjects, m.Stats.ReusedObjects)
+		fmt.Printf("  capture:        %d new object(s) (%s), %d reused object(s)\n",
+			m.Stats.NewObjects, snapshot.HumanBytes(m.Stats.NewBytes), m.Stats.ReusedObjects)
+		fmt.Printf("\nstorage:\n")
+		fmt.Printf("  referenced:     %s across %d object(s)\n",
+			snapshot.HumanBytes(storageInfo.ReferencedBytes), storageInfo.ReferencedObjects)
+		fmt.Printf("  exclusive:      %s across %d object(s) (reclaimable after delete + prune)\n",
+			snapshot.HumanBytes(storageInfo.ExclusiveBytes), storageInfo.ExclusiveObjects)
+		fmt.Printf("  shared:         %s across %d object(s) (reused by other snapshots)\n",
+			snapshot.HumanBytes(storageInfo.SharedBytes), storageInfo.SharedObjects)
 
 		if len(m.Containers) > 0 {
 			fmt.Printf("\ncontainers:\n")

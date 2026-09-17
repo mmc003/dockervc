@@ -53,6 +53,19 @@ type SnapshotRow struct {
 	Size      int64 // sum of referenced object sizes
 }
 
+// SnapshotStorage describes how one snapshot's objects occupy the current
+// store. Referenced is the complete, deduplicated set needed to restore or
+// export the snapshot. Exclusive objects are kept alive only by this snapshot;
+// shared objects are also referenced by at least one other snapshot.
+type SnapshotStorage struct {
+	ReferencedObjects int
+	ReferencedBytes   int64
+	ExclusiveObjects  int
+	ExclusiveBytes    int64
+	SharedObjects     int
+	SharedBytes       int64
+}
+
 // InsertSnapshot persists a completed manifest and its object references.
 func (s *Store) InsertSnapshot(m *model.Manifest) error {
 	hash, err := m.Hash()
@@ -142,6 +155,36 @@ func (s *Store) ListSnapshots() ([]SnapshotRow, error) {
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// SnapshotStorageInfo returns current physical object-store accounting for a
+// snapshot. refs has a (snapshot_id, hash) primary key, so each object is
+// counted once even when several entities in the manifest reference it.
+func (s *Store) SnapshotStorageInfo(snapshotID string) (SnapshotStorage, error) {
+	row := s.DB.QueryRow(`
+		WITH selected AS (
+			SELECT r.hash, o.size,
+				(SELECT COUNT(*) FROM refs all_refs WHERE all_refs.hash = r.hash) AS ref_count
+			FROM refs r
+			JOIN objects o ON o.hash = r.hash
+			WHERE r.snapshot_id = ?
+		)
+		SELECT
+			COUNT(*),
+			COALESCE(SUM(size), 0),
+			COALESCE(SUM(CASE WHEN ref_count = 1 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN ref_count = 1 THEN size ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN ref_count > 1 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN ref_count > 1 THEN size ELSE 0 END), 0)
+		FROM selected`, snapshotID)
+
+	var info SnapshotStorage
+	err := row.Scan(
+		&info.ReferencedObjects, &info.ReferencedBytes,
+		&info.ExclusiveObjects, &info.ExclusiveBytes,
+		&info.SharedObjects, &info.SharedBytes,
+	)
+	return info, err
 }
 
 // DeleteSnapshot removes a snapshot row and its references (objects are

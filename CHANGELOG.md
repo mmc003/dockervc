@@ -4,6 +4,16 @@ User-facing changes per version. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions match the
 [GitHub releases](https://github.com/mmc003/dockervc/releases).
 
+## v0.7.0 — 2026-09-17
+
+### Snapshot storage accounting
+
+- `dockervc show <snapshot>` now separates capture-time new/reused object
+  counts from the snapshot's current storage footprint.
+- Storage is reported as unique referenced bytes, snapshot-exclusive bytes
+  reclaimable after `delete` plus `prune`, and bytes shared with other
+  snapshots. Duplicate references within one snapshot are counted once.
+
 ## v0.6.0 — 2026-09-16
 
 ### Windows uninstaller
