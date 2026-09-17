@@ -140,6 +140,10 @@ dockervc export snap-...                  # writes exports/<snapshot-id>.dvca (f
 dockervc export --latest -o /path/state.dvca
 dockervc config set export.folder ~/backups   # default folder for exports (menus and bare command)
 dockervc config unset export.folder           # back to exports/ in the current directory
+dockervc archive list                         # quickly list exports in the configured folder
+dockervc archive show state.dvca              # inspect contents without importing
+dockervc archive verify state.dvca            # fully hash-check every archived object
+dockervc archive files state.dvca demo-data   # list files captured for one volume
 dockervc import state.dvca                # verify + add to this machine's store
 dockervc import state.dvca --apply        # ... then roll this engine back to it (asks once)
 ```
@@ -149,6 +153,12 @@ verbatim, and a GNU `sha256sum`-style checksums file — after `tar xf` you can
 verify it with plain `shasum -a 256 -c checksums.sha256`, no dockervc needed.
 Import re-hashes every object while streaming it in; a tampered or truncated
 archive is rejected by name, and re-importing the same snapshot is a no-op.
+`archive list` and `archive show` read only the leading manifest, so browsing
+large exports is fast. `archive verify` performs the deliberately slower full
+structure and checksum pass. `archive files` authenticates and reads the
+selected volume's stored file index; snapshots from before file indexing report
+that no index is available. All four actions are also available through the
+guided `dockervc cli` Archive menu.
 
 Useful snapshot flags:
 
@@ -246,6 +256,7 @@ many snapshots — repeated snapshots are cheap.
 | Integrity verification, prune/GC | ✅ working |
 | Rollback (full engine / granular entities) | ✅ working |
 | Export to portable archive / import on another machine | ✅ working |
+| Browse and verify exported archives without importing | ✅ working |
 
 ## Design
 

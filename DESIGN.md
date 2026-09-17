@@ -157,6 +157,10 @@ dockervc rollback <snap>                          # interactive scope prompt
 # ── Portability ─────────────────────────────────────────────────────────────────
 dockervc export   <snap> -o state.dvca            # single-file portable archive
                   [--latest]                      # [--split 4g] deferred
+dockervc archive  list [directory]                # fast manifest-only export listing
+dockervc archive  show state.dvca                 # inspect without importing
+dockervc archive  verify state.dvca               # full structure + checksum pass
+dockervc archive  files state.dvca <volume> [path] # list an archived volume index
 dockervc import   state.dvca [--apply]            # verify + add to local store
                                                   # --apply additionally rolls back to it
 

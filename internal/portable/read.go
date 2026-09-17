@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"dockervc/internal/model"
+	"dockervc/internal/progress"
 	"dockervc/internal/store"
 )
 
@@ -66,6 +67,12 @@ func (ix *Index) ObjectSize(hash string) int64 {
 // checksums.sha256, undecodable manifests, and checksums that disagree with
 // the manifest's canonical hash or the entry names.
 func IndexArchive(path string) (*Index, error) {
+	return indexArchive(path, nil)
+}
+
+// indexArchive is IndexArchive with an optional raw archive-byte callback.
+// Verification uses it to keep the structural pass visible on large files.
+func indexArchive(path string, advance func(int64)) (*Index, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -75,7 +82,11 @@ func IndexArchive(path string) (*Index, error) {
 	ix := &Index{Path: path, Checksums: map[string]string{}}
 	var manifestBlob, checksumsBlob []byte
 	seen := map[string]bool{}
-	tr := tar.NewReader(f)
+	var source io.Reader = f
+	if advance != nil {
+		source = &progress.CountingReader{Reader: f, Advance: advance}
+	}
+	tr := tar.NewReader(source)
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {

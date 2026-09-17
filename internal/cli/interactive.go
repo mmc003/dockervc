@@ -64,6 +64,7 @@ var menuActions = []action{
 	{"config", "[get|set|unset]", "view or change store settings", guidedConfig},
 	{"rollback", "<snap> [--all]", "restore engine state from a snapshot", guidedRollback},
 	{"export", "<snap> [-o <file>]", "package a snapshot into a portable .dvca archive", guidedExport},
+	{"archive", "list|show|verify|files", "inspect exported .dvca archives", guidedArchive},
 	{"import", "<archive.dvca>", "add an archive's snapshot to this store", guidedImport},
 }
 
@@ -315,6 +316,52 @@ func guidedExport(r *bufio.Reader) []string {
 	}
 	path := promptLine(r, "output path", defaultExportPath(id))
 	return []string{"export", id, "-o", path}
+}
+
+// guidedArchive exposes the archive-inspection command group without making
+// line-menu users memorize its subcommands.
+func guidedArchive(r *bufio.Reader) []string {
+	action := strings.ToLower(promptLine(r, "archive action (list/show/verify/files)", "list"))
+	switch action {
+	case "list", "ls":
+		dir := promptLine(r, "directory (blank uses configured export folder)", "")
+		if dir == "" {
+			return []string{"archive", "list"}
+		}
+		return []string{"archive", "list", dir}
+	case "show", "verify", "files":
+		items := findArchives()
+		def := ""
+		if len(items) == 1 {
+			def = items[0].value
+		}
+		if len(items) > 0 {
+			fmt.Println("archives found:")
+			for _, item := range items {
+				fmt.Printf("   %s  (%s)\n", item.value, item.note)
+			}
+		}
+		archivePath := promptLine(r, "archive path (.dvca)", def)
+		if archivePath == "" {
+			return nil
+		}
+		if action != "files" {
+			return []string{"archive", action, archivePath}
+		}
+		volume := promptLine(r, "volume name", "")
+		if volume == "" {
+			return nil
+		}
+		prefix := promptLine(r, "optional file/directory prefix", "")
+		argv := []string{"archive", "files", archivePath, volume}
+		if prefix != "" {
+			argv = append(argv, prefix)
+		}
+		return argv
+	default:
+		fmt.Printf("unknown archive action %q\n", action)
+		return nil
+	}
 }
 
 // guidedImport asks for the archive, then whether to chain straight into a

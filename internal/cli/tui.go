@@ -546,6 +546,8 @@ func (t *tui) runMenuAction(i int) {
 				t.execTUI("export", id, "-o", path)
 			})
 		})
+	case "archive":
+		t.askArchiveAction()
 	case "import":
 		t.askImportArchive()
 	case "config":

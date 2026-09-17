@@ -108,6 +108,10 @@ func TestPathToken(t *testing.T) {
 	}{
 		{[]string{"import", "/tmp/a.dvca"}, true},
 		{[]string{"import", "/tmp/a"}, true},
+		{[]string{"archive", "show", "/tmp/a.dvca"}, true},
+		{[]string{"archive", "verify", "/tmp/a.dvca"}, true},
+		{[]string{"archive", "files", "/tmp/a.dvca"}, true},
+		{[]string{"archive", "files", "/tmp/a.dvca", "volume"}, false},
 		{[]string{"export", "snap-1", "-o", "/tmp/a"}, true},
 		{[]string{"export", "snap-1", "--output", "/tmp/a"}, true},
 		{[]string{"export", "snap-1", "-o"}, false}, // the flag itself, not its value

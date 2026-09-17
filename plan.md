@@ -1,16 +1,21 @@
-# Active Implementation Plan — Deep Status and Progress/ETA
+# Implementation Plan and Recovery Checkpoint — Progress/ETA and TUI
 
 Last updated: 2026-09-17
 
-This file is a recovery checkpoint for the in-progress v0.7.0 work. It is
-intentionally detailed enough to resume after an interrupted session.
+This file records the completed v0.7.0 deep-status/progress work and the
+remaining follow-ups. It is intentionally detailed enough to resume after an
+interrupted session.
 
 ## Working-tree context
 
 - Branch: `windows-port`
-- Last pushed commit before this work: `1181aab` (`feat: show snapshot storage sharing`)
-- The deep-status and progress changes described below are currently
-  uncommitted unless a later checkpoint says otherwise.
+- Latest pushed implementation commit: `324a4dd`
+  (`feat: add deep status and operation ETA`).
+- Commit `324a4dd` contains stages 1–5, their tests and documentation, and the
+  stage 7 TUI implementation plan. It explicitly records that interactive
+  CLI/TUI ETA is not operational yet.
+- The preceding snapshot-storage-accounting commit is `1181aab`
+  (`feat: show snapshot storage sharing`).
 - Preserve all existing snapshot-storage-accounting changes.
 
 ## Completed: snapshot storage accounting
@@ -22,9 +27,9 @@ intentionally detailed enough to resume after an interrupted session.
 - Version was raised from 0.6.0 to 0.7.0 and documented.
 - Tests passed and commit `1181aab` was pushed.
 
-## Completed locally: deep live-volume status
+## Completed and pushed: deep live-volume status
 
-Implemented but not yet committed at the time this checkpoint was written:
+Implemented in commit `324a4dd`:
 
 - `status --deep`
 - `status --deep --volumes name,...`
@@ -46,7 +51,7 @@ go vet ./...
 go test ./...
 ```
 
-## Implemented locally: reusable progress and ETA system
+## Completed and pushed: reusable progress and ETA system
 
 ### Design rules
 
@@ -66,10 +71,9 @@ go test ./...
 - The full-screen TUI currently keeps its existing `running: ...` display.
   The approved follow-up plan for live TUI progress is recorded in stage 7.
 
-### Current code checkpoint
+### Committed code checkpoint
 
-The following files were just added/modified and must be compiled and tested
-before further integration:
+The following core files were added or modified in commit `324a4dd`:
 
 - `internal/progress/progress.go`
   - `Event`, `Reporter`, `ReporterFunc`, `Nop`
@@ -85,11 +89,11 @@ before further integration:
 - `internal/cli/interactive.go`
   - resets `noProgress` between in-process TUI commands
 
-The core, renderer, and deterministic tests now exist. Export, restore,
-snapshot, and deep status have been connected to the reporter. Final
-`go vet ./...` and `go test ./...` both pass. A version-stamped Windows build
-reports `dockervc 0.7.0 (windows/amd64)` and exposes the new global
-`--no-progress` flag plus the deep-status flags.
+The core, renderer, and deterministic tests exist. Export, restore, snapshot,
+and deep status are connected to the reporter. Before commit `324a4dd` was
+pushed, final `go vet ./...` and `go test ./...` both passed. A version-stamped
+Windows build reports `dockervc 0.7.0 (windows/amd64)` and exposes the new
+global `--no-progress` flag plus the deep-status flags.
 
 ## Implementation record and remaining work
 
@@ -365,6 +369,290 @@ Documentation/version:
   show live progress.
 - Keep version `0.7.0` while this remains part of the same unreleased feature
   batch; do not bump again solely for the TUI completion.
+
+## Implemented locally: exported archive inspection
+
+- `archive list [directory]` quickly lists `.dvca` files by reading only each
+  leading manifest; it does not stream multi-gigabyte object payloads.
+- `archive show <file.dvca>` displays snapshot metadata, archive/captured
+  sizes, resource counts, volumes, images, and file-index availability without
+  importing or mutating the store.
+- `archive verify <file.dvca>` checks structure, required objects, manifest and
+  object checksums, with exact progress for both structural and hashing passes.
+- `archive files <file.dvca> <volume> [prefix]` authenticates and decodes the
+  selected volume-index object and lists indexed paths without importing.
+- The line menu and full-screen TUI expose a guided Archive flow; raw `:` mode
+  completes archive paths.
+- Focused portable and CLI tests cover fast inspection, full verification,
+  tamper detection, object authentication, path filtering, and unsafe-prefix
+  rejection. Final `go vet ./...` and `go test ./...` pass.
+- This archive-inspection batch and the plan updates are currently uncommitted.
+
+## Future archive extraction roadmap
+
+This roadmap follows the archive-inspection commands (`archive list`,
+`archive show`, `archive verify`, and `archive files`) without changing the
+existing progress and TUI stage numbering above. The labels start at E2
+because archive inspection is the first archive feature; E2–E5 are future
+extraction and packaging work and are not part of the current
+archive-inspection implementation.
+
+### E2. Extract whole volumes and images from local snapshots
+
+Goal:
+
+- Recover one complete volume or image from a snapshot in the local store
+  without restoring the full snapshot and without requiring a running Docker
+  engine.
+
+Recommended CLI:
+
+```text
+dockervc extract volume <snapshot> <volume> -o <volume.tar>
+dockervc extract image <snapshot> <image-ref-or-id> -o <image.tar>
+```
+
+Examples:
+
+```powershell
+dockervc extract volume latest openclaw_dev_home -o openclaw-home.tar
+dockervc extract image snap-123 postgres:17 -o postgres-17.tar
+docker load -i postgres-17.tar
+```
+
+Semantics and safety:
+
+- Resolve snapshot IDs, unambiguous prefixes, and `latest` through the same
+  resolver used by existing snapshot commands.
+- Resolve resource names from the selected snapshot manifest. Ambiguous
+  image references must fail and list the matching IDs/references.
+- Stream the selected CAS object through decompression to the output; do not
+  materialize the full object in memory or a temporary file.
+- A whole-volume extraction emits the captured standard tar stream. An image
+  extraction emits the original Docker-save tar stream, suitable for
+  `docker load`.
+- Refuse to overwrite an existing output unless an explicit `--force` flag
+  is supplied. Write to a temporary sibling file and atomically rename it on
+  success so cancellation or corruption cannot leave a plausible partial
+  result at the requested path.
+- Support `-o -` for stdout only when diagnostics and progress remain on
+  stderr. Suppress terminal control sequences when stderr is redirected.
+- Verify the selected CAS object's digest while streaming. On mismatch,
+  delete the temporary output and return a corruption error.
+- Reject directory output paths, special files, and output paths that alias
+  the underlying object-store file.
+- Reuse the existing progress reporter with exact stored-byte totals and
+  elapsed time/ETA. Honor global `--no-progress`.
+
+Shared implementation:
+
+- Introduce a read-only resource selector that accepts a snapshot manifest
+  and returns a typed volume/image object reference plus user-facing identity.
+- Introduce an object-source interface that can open an object stream and
+  report its stored size and expected digest. Initially implement it for the
+  local CAS; E4 will add a `.dvca` implementation.
+- Keep extraction logic below Cobra so CLI, TUI, and tests can call the same
+  service.
+
+Tests:
+
+- Whole-volume output is byte-for-byte the original uncompressed tar.
+- Image output is a valid Docker-save tar and preserves its manifest entries.
+- `latest`, full IDs, prefixes, names, and image references resolve correctly.
+- Missing and ambiguous resources return actionable errors.
+- Existing outputs are protected unless `--force` is set.
+- Digest failure and cancellation remove temporary outputs.
+- Stdout extraction contains only payload bytes; progress remains on stderr.
+- Large objects are streamed with bounded memory and emit exact progress.
+
+### E3. Extract individual files and directories from volumes
+
+Goal:
+
+- Extract a selected regular file or directory tree from a captured volume
+  without restoring the volume or scanning unrelated snapshot resources.
+
+Recommended CLI:
+
+```text
+dockervc extract volume <snapshot> <volume> --path <path> -o <selection.tar>
+dockervc extract volume <snapshot> <volume> --path <file> --raw -o <file>
+```
+
+Recommended behavior:
+
+- Tar is the default output for both files and directories so permissions,
+  timestamps, ownership, links, and directory structure can be preserved.
+- `--raw` is valid only when `--path` resolves to exactly one regular file;
+  it writes that file's content without a tar wrapper.
+- Interpret `--path` as a volume-root-relative, slash-separated path. Accept
+  a leading `./` for convenience, normalize it, and reject absolute paths,
+  drive-qualified paths, NULs, and any `..` traversal.
+- A directory selection includes the directory entry and all descendants.
+  Matching must occur on normalized path components, not string prefixes
+  (`foo` must not also select `foobar`).
+- Preserve tar metadata for selected entries. Preserve symlink and hardlink
+  entries without following them outside the archive.
+- Reject duplicate/conflicting normalized names and unsafe link targets in
+  raw or filesystem-oriented output modes. Merely emitting a filtered tar
+  may retain link metadata but must never dereference it on the host.
+- Use the stored volume file index to validate that the requested path exists
+  and identify its type before opening the object. Legacy snapshots without
+  an index may fall back to a single streaming tar scan, clearly reporting
+  that lookup is slower.
+- Continue streaming the tar. Do not unpack into a temporary directory.
+- Progress measures source object bytes consumed. The total is exact for the
+  stored object, while the selected output size can remain informational
+  because tar traversal may require reading past unrelated entries.
+
+Shared implementation:
+
+- Add a reusable normalized archive-path type and component-aware subtree
+  matcher.
+- Add a streaming tar filter that copies selected headers and bodies to a tar
+  writer, with an alternate raw-file sink.
+- Keep selection independent of the local CAS by consuming the E2
+  object-source interface; this makes E4 a source substitution rather than a
+  second extraction implementation.
+
+Tests:
+
+- Extract a file, empty directory, nested directory, symlink, hardlink, and
+  zero-byte file.
+- Confirm component-boundary matching and deterministic filtered-tar output.
+- Reject absolute, drive-qualified, traversal, and malformed paths.
+- Reject `--raw` for directories, links, multiple matches, and missing files.
+- Confirm metadata preservation and no host-side link dereferencing.
+- Cover indexed lookup and the legacy-index fallback.
+- Verify partial reads, malformed tar headers, digest mismatches, and
+  cancellation leave no final output.
+
+### E4. Extract resources directly from `.dvca` archives
+
+Goal:
+
+- Provide the E2 and E3 extraction behavior directly from a portable archive
+  without first importing it into the local store.
+
+Recommended CLI:
+
+```text
+dockervc archive extract <file.dvca> volume <volume> -o <volume.tar>
+dockervc archive extract <file.dvca> volume <volume> --path <path> -o <selection.tar>
+dockervc archive extract <file.dvca> volume <volume> --path <file> --raw -o <file>
+dockervc archive extract <file.dvca> image <image-ref-or-id> -o <image.tar>
+```
+
+Semantics and format considerations:
+
+- Read and validate `manifest.json` before resolving a resource. Do not write
+  snapshot metadata or objects into the local store.
+- Locate the referenced `objects/<digest>` member through the portable
+  archive index. Reject duplicate object paths, unexpected entry types,
+  truncated data, digest/path disagreement, and references to absent objects.
+- Apply the same resource resolution, path normalization, filtered-tar, raw
+  extraction, overwrite, temporary-file, cancellation, and progress rules as
+  E2/E3.
+- Extraction must work on seekable archive files. For stdin, either spool to
+  a bounded/declared temporary file or reject it initially with a clear
+  message; do not silently buffer an unbounded archive in memory.
+- Structural validation may be limited to the manifest and selected object
+  for fast extraction. Offer or document `archive verify` when the user wants
+  a full-archive checksum pass.
+- Preserve compatibility with the current `.dvca` format. Do not modify the
+  manifest or treat a partial selection as a new snapshot.
+
+Shared implementation:
+
+- Implement the E2 object-source interface for indexed `.dvca` members.
+- Route both local-snapshot and archive extraction through the same selector
+  and extraction service. Only manifest loading and object opening should
+  differ by source.
+- Reuse archive-inspection indexing code so large archives are not scanned
+  once for `show` and again merely to locate the selected object in the same
+  process.
+
+Tests:
+
+- Run the same whole-resource and path-selection contract tests against local
+  CAS and `.dvca` object sources.
+- Extract from archives with reordered members and unrelated extra objects.
+- Detect missing, duplicated, truncated, corrupt, and mismatched objects.
+- Confirm extraction does not mutate the local database or CAS.
+- Verify large-object streaming, cancellation cleanup, stdout purity, and
+  redirected progress output.
+
+### E5. Evaluate importable selective resource bundles
+
+Goal:
+
+- Decide whether users need a portable package that can restore one volume or
+  load one image without importing a complete snapshot. Do not overload or
+  silently weaken the existing `.dvca` snapshot contract.
+
+Decision gate:
+
+- First ship and observe E2–E4. Plain volume/image tar extraction may satisfy
+  recovery and transfer needs (`docker load` already accepts image output).
+- Proceed only if there is a concrete need for retained dockervc metadata,
+  direct named-volume restore, multi-resource selection, or a one-command
+  import/apply workflow.
+
+Proposed CLI if needed:
+
+```text
+dockervc bundle volume <snapshot> <volume> -o <volume.dvcb>
+dockervc bundle image <snapshot> <image-ref-or-id> -o <image.dvcb>
+dockervc bundle show <file.dvcb>
+dockervc bundle verify <file.dvcb>
+dockervc bundle import <file.dvcb>
+```
+
+Format and safety design requirements:
+
+- Use a distinct bundle extension and format/version marker (for example,
+  `.dvcb`), not a `.dvca` containing an edited full-snapshot manifest.
+- Give every bundle its own immutable bundle ID derived from canonical
+  metadata and referenced object digests. Never reuse the source snapshot ID
+  for a partial manifest, avoiding collisions with later full-snapshot
+  imports.
+- Record source snapshot ID as provenance only, plus resource type, original
+  identity, capture metadata, object digest, logical size, stored size,
+  compression, and required format version.
+- Define explicit conflict behavior at import/apply time: fail by default if
+  a target volume or image identity exists, with separately reviewed rename
+  or replace options. Any destructive replacement requires an explicit flag
+  and, for volumes, a safety snapshot where feasible.
+- Keep verification possible without Docker. Applying a volume or loading an
+  image may require Docker and should reuse rollback/restore primitives and
+  progress reporting.
+- Specify whether one bundle may contain multiple selected resources before
+  freezing v1. Prefer a manifest capable of a resource list even if the first
+  CLI creates one-resource bundles.
+- Document forward-compatibility rules, canonical manifest encoding,
+  checksum/signature boundaries, and limits for entry count, path length,
+  and declared sizes.
+
+Shared implementation:
+
+- Reuse resource selectors, object sources, safe archive writing, digest
+  verification, and progress reporting from E2–E4.
+- Keep bundle import separate from snapshot import in storage and CLI layers;
+  a bundle is a resource transfer artifact, not snapshot history.
+
+Tests required before stabilizing the format:
+
+- Deterministic bundle bytes and IDs for identical inputs.
+- Round-trip volume restore and Docker image load.
+- Provenance survives without creating or shadowing a snapshot record.
+- Conflict, rename, explicit replace, safety-checkpoint, and cancellation
+  behavior.
+- Unknown versions/features fail safely; optional metadata is ignored only
+  when the format declares it safe.
+- Corrupt manifests, object digests, duplicate entries, zip/tar path
+  traversal, oversized declarations, and truncated bundles are rejected.
+- Cross-platform path and metadata fixtures, plus compatibility fixtures that
+  remain readable after future format changes.
 
 ## Verification checklist
 

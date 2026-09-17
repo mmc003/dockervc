@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"dockervc/internal/portable"
 	"dockervc/internal/snapshot"
 	"dockervc/internal/store"
 )
@@ -107,8 +108,8 @@ func lcp(ss []string) string {
 }
 
 // pathToken reports whether the last token of toks (command name first) is a
-// filesystem path argument: import's archive, export's -o/--output value, or
-// the directory of `config set export.folder`.
+// filesystem path argument: import/archive paths, export's -o/--output value,
+// or the directory of `config set export.folder`.
 func pathToken(toks []string) bool {
 	if len(toks) < 2 {
 		return false
@@ -117,6 +118,9 @@ func pathToken(toks []string) bool {
 	switch toks[0] {
 	case "import":
 		return last == 1
+	case "archive":
+		return last == 2 && len(toks) >= 3 &&
+			(toks[1] == "list" || toks[1] == "show" || toks[1] == "verify" || toks[1] == "files")
 	case "export":
 		return last >= 2 && (toks[last-1] == "-o" || toks[last-1] == "--output")
 	case "config":
@@ -154,11 +158,15 @@ func exportFolderSetting() string {
 // defaultExportPath is where exports land by default: the export.folder
 // setting when set, else an exports/ folder in the current directory — the
 // same default the bare command uses, created on demand.
-func defaultExportPath(id string) string {
+func defaultExportDir() string {
 	if dir := exportFolderSetting(); dir != "" {
-		return filepath.Join(dir, id+".dvca")
+		return dir
 	}
-	return filepath.Join("exports", id+".dvca")
+	return "exports"
+}
+
+func defaultExportPath(id string) string {
+	return filepath.Join(defaultExportDir(), id+".dvca")
 }
 
 // downloadsDir is the user's Downloads folder, or "" when it can't be found.
@@ -260,6 +268,86 @@ func (t *tui) askImportArchive() {
 			return
 		}
 		t.askImportPath(val)
+	})
+}
+
+// askArchiveAction provides guided access to the archive command group. List
+// is immediate; the other actions reuse the archive picker already used by
+// import, with a manual path fallback.
+func (t *tui) askArchiveAction() {
+	items := []listItem{
+		{text: "list exported archives", note: "fast manifest scan", value: "list"},
+		{text: "show archive", note: "snapshot and resource summary", value: "show"},
+		{text: "verify archive", note: "full checksum pass", value: "verify"},
+		{text: "list volume files", note: "uses captured file index", value: "files"},
+	}
+	t.askListOne("archive action", items, func(action string, ok bool) {
+		if !ok {
+			return
+		}
+		if action == "list" {
+			t.execTUI("archive", "list")
+			return
+		}
+		t.askArchivePath(action)
+	})
+}
+
+func (t *tui) askArchivePath(action string) {
+	items := findArchives()
+	if len(items) == 0 {
+		t.askArchiveManualPath(action, "")
+		return
+	}
+	items = append(items, listItem{text: "enter a path manually…", value: ""})
+	t.askListOne(action+" which archive?", items, func(value string, ok bool) {
+		if ok {
+			t.askArchiveManualPath(action, value)
+		}
+	})
+}
+
+func (t *tui) askArchiveManualPath(action, value string) {
+	t.askPath("archive path (.dvca)", value, func(archivePath string, ok bool) {
+		if !ok || archivePath == "" {
+			return
+		}
+		if action != "files" {
+			t.execTUI("archive", action, archivePath)
+			return
+		}
+		m, err := portable.PeekArchive(expandHome(archivePath))
+		if err != nil {
+			t.flash = "cannot inspect archive: " + err.Error()
+			return
+		}
+		volumes := make([]listItem, 0, len(m.Volumes))
+		for _, volume := range m.Volumes {
+			note := fmt.Sprintf("%s · %d indexed file(s)", snapshot.HumanBytes(volume.Size), volume.Files)
+			if volume.IndexObject == "" {
+				note = "file index unavailable"
+			}
+			volumes = append(volumes, listItem{text: volume.Name, note: note, value: volume.Name})
+		}
+		if len(volumes) == 0 {
+			t.flash = "archive contains no volumes"
+			return
+		}
+		t.askListOne("list files from which volume?", volumes, func(volume string, ok bool) {
+			if !ok {
+				return
+			}
+			t.askText("optional file/directory prefix", "", func(prefix string, ok bool) {
+				if !ok {
+					return
+				}
+				argv := []string{"archive", "files", archivePath, volume}
+				if strings.TrimSpace(prefix) != "" {
+					argv = append(argv, prefix)
+				}
+				t.execTUI(argv...)
+			})
+		})
 	})
 }
 

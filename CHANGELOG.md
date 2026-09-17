@@ -33,6 +33,15 @@ User-facing changes per version. Format loosely follows
 - Interactive terminals update progress in place, while redirected output is
   plain and throttled. The global `--no-progress` flag suppresses it.
 
+### Exported archive inspection
+
+- New `dockervc archive list`, `show`, `verify`, and `files` commands browse
+  `.dvca` exports without importing them. Listing and showing read only the
+  leading manifest; verification performs a full object checksum pass.
+- `archive files <file.dvca> <volume> [prefix]` authenticates the selected
+  volume index and lists captured paths, sizes, types, modification times, and
+  link targets. The interactive CLI includes a guided Archive flow.
+
 ## v0.6.0 — 2026-09-16
 
 ### Windows uninstaller
