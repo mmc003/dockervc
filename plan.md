@@ -1,6 +1,6 @@
 # Implementation Plan and Recovery Checkpoint — Progress/ETA and TUI
 
-Last updated: 2026-09-17
+Last updated: 2026-09-21
 
 This file records the completed v0.7.0 deep-status/progress work and the
 remaining follow-ups. It is intentionally detailed enough to resume after an
@@ -9,8 +9,8 @@ interrupted session.
 ## Working-tree context
 
 - Branch: `windows-port`
-- Latest pushed implementation commit: `324a4dd`
-  (`feat: add deep status and operation ETA`).
+- Latest pushed implementation commit: `4d449a9`
+  (`feat: inspect exported archives`).
 - Commit `324a4dd` contains stages 1–5, their tests and documentation, and the
   stage 7 TUI implementation plan. It explicitly records that interactive
   CLI/TUI ETA is not operational yet.
@@ -386,18 +386,44 @@ Documentation/version:
 - Focused portable and CLI tests cover fast inspection, full verification,
   tamper detection, object authentication, path filtering, and unsafe-prefix
   rejection. Final `go vet ./...` and `go test ./...` pass.
-- This archive-inspection batch and the plan updates are currently uncommitted.
+- Archive inspection was committed and pushed in `4d449a9`.
 
-## Future archive extraction roadmap
+## Archive extraction roadmap
 
 This roadmap follows the archive-inspection commands (`archive list`,
 `archive show`, `archive verify`, and `archive files`) without changing the
 existing progress and TUI stage numbering above. The labels start at E2
-because archive inspection is the first archive feature; E2–E5 are future
-extraction and packaging work and are not part of the current
-archive-inspection implementation.
+because archive inspection is the first archive feature. E2 and E3 are now
+implemented locally through the existing `export` command; E4 and E5 remain
+future work.
 
-### E2. Extract whole volumes and images from local snapshots
+### E2. Extract whole volumes and images from local snapshots — implemented locally
+
+Implementation checkpoint (2026-09-21):
+
+- The approved UX was integrated into `export` rather than adding a separate
+  `extract` command:
+
+  ```text
+  dockervc export <snapshot|latest> --volume <volume> [-o <volume.tar>]
+  dockervc export <snapshot|latest> --image <ref-or-digest> [-o <image.tar>]
+  ```
+- `internal/artifact` provides reusable manifest selectors plus a streaming,
+  checksum-verifying local-CAS exporter. Whole volume and image output is the
+  original uncompressed tar stream; Docker is not required.
+- Outputs are written to a sibling temporary file, synced, and renamed only
+  after the complete compressed CAS object matches its SHA-256 name.
+- Existing outputs require the command's standard `--yes` flag. Non-regular,
+  symlink, and CAS-alias output paths are rejected.
+- Exact stored-byte progress, elapsed time, and ETA use the existing reporter.
+- With no `-o`, artifacts are organized below
+  `<export.folder>/<snapshot-id>/volumes|images/` and atomically registered in
+  `export-index.json`. Explicit `-o` outputs are not registered.
+- `archive list` includes registered partial artifacts alongside `.dvca`
+  archives. The line menu and full-screen TUI expose selective export flows.
+- Stdout (`-o -`) was intentionally deferred: safe stdout output requires a
+  verification pass before emitting bytes because corrupt output cannot be
+  retracted.
 
 Goal:
 
@@ -405,7 +431,7 @@ Goal:
   without restoring the full snapshot and without requiring a running Docker
   engine.
 
-Recommended CLI:
+Earlier standalone-command sketch (superseded by the integrated CLI above):
 
 ```text
 dockervc extract volume <snapshot> <volume> -o <volume.tar>
@@ -431,12 +457,12 @@ Semantics and safety:
 - A whole-volume extraction emits the captured standard tar stream. An image
   extraction emits the original Docker-save tar stream, suitable for
   `docker load`.
-- Refuse to overwrite an existing output unless an explicit `--force` flag
+- Refuse to overwrite an existing output unless the standard `--yes` flag
   is supplied. Write to a temporary sibling file and atomically rename it on
   success so cancellation or corruption cannot leave a plausible partial
   result at the requested path.
-- Support `-o -` for stdout only when diagnostics and progress remain on
-  stderr. Suppress terminal control sequences when stderr is redirected.
+- Future: support `-o -` only with a verify-first/two-pass design; diagnostics
+  and progress must remain on stderr.
 - Verify the selected CAS object's digest while streaming. On mismatch,
   delete the temporary output and return a corruption error.
 - Reject directory output paths, special files, and output paths that alias
@@ -460,19 +486,49 @@ Tests:
 - Image output is a valid Docker-save tar and preserves its manifest entries.
 - `latest`, full IDs, prefixes, names, and image references resolve correctly.
 - Missing and ambiguous resources return actionable errors.
-- Existing outputs are protected unless `--force` is set.
+- Existing outputs are protected unless `--yes` is set.
 - Digest failure and cancellation remove temporary outputs.
 - Stdout extraction contains only payload bytes; progress remains on stderr.
 - Large objects are streamed with bounded memory and emit exact progress.
 
-### E3. Extract individual files and directories from volumes
+### E3. Extract individual files and directories from volumes — implemented locally
+
+Implementation checkpoint (2026-09-21):
+
+- Integrated CLI:
+
+  ```text
+  dockervc export <snapshot|latest> --volume <volume> --path <path> [-o <selection.tar>]
+  dockervc export <snapshot|latest> --volume <volume> --path <file> --raw [-o <file>]
+  dockervc files <snapshot|latest> <volume> [prefix]
+  ```
+- The tar filter scans the stored volume stream once, uses component-aware
+  matching, preserves selected tar headers/metadata, and never unpacks onto
+  the host. It continues through the complete object so checksum verification
+  covers all stored bytes.
+- Paths are normalized as slash-separated, volume-relative names. Absolute,
+  drive-qualified, NUL-containing, and `..` paths are rejected.
+- `--raw` accepts exactly one regular-file entry and rejects directories,
+  links, duplicates, and missing paths.
+- Default filtered/raw outputs are organized below
+  `selections/<volume>/` and `raw/<volume>/`, respectively, and recorded in
+  the same export index.
+- `dockervc files` browses the already captured local volume index without
+  Docker. The guided line menu and TUI expose it. The full-screen selective
+  export flow also reuses that index as a filterable hierarchical browser:
+  Enter opens folders, “export this folder” selects the current subtree, and
+  manual entry remains available for legacy snapshots and empty directories
+  (directory entries are not stored in the index).
+- Focused tests cover whole-object equality, subtree selection, raw files,
+  unsafe/missing paths, CAS corruption, CLI flag validation, default layout,
+  index registration, and partial-export discovery.
 
 Goal:
 
 - Extract a selected regular file or directory tree from a captured volume
   without restoring the volume or scanning unrelated snapshot resources.
 
-Recommended CLI:
+Earlier standalone-command sketch (superseded by the integrated CLI above):
 
 ```text
 dockervc extract volume <snapshot> <volume> --path <path> -o <selection.tar>
@@ -653,6 +709,498 @@ Tests required before stabilizing the format:
   traversal, oversized declarations, and truncated bundles are rejected.
 - Cross-platform path and metadata fixtures, plus compatibility fixtures that
   remain readable after future format changes.
+
+## Planned feature: dependency-aware container reconciliation
+
+Status: desired behavior agreed in principle on 2026-09-21; implementation is
+deferred. Review unresolved details again before writing code.
+
+### Goal
+
+A snapshot should store a container as a recreation recipe whose fields refer
+to the image, volumes/mounts, networks, configuration, and desired running
+state needed to reproduce it. Restoring a container should reconcile that
+recipe with the live Docker engine instead of always deleting and recreating
+everything:
+
+- leave present and unchanged entities untouched;
+- prompt before restoring present but changed entities;
+- create or load entities that are completely missing;
+- stop/recreate the container only when its creation-time configuration or
+  image actually requires it;
+- restore a changed volume in place under the same volume name;
+- show and safely coordinate every container affected by shared storage.
+
+Names remain the user-facing identity, but names alone are not sufficient to
+detect equality. Each reference also needs an immutable digest, normalized
+configuration hash, or captured content/index hash, plus the snapshot object
+required to restore it.
+
+### Implementation checkpoint: reconciliation stage 1
+
+Implemented locally on 2026-09-21; not yet committed as a standalone change:
+
+- Live rollback inventory now inspects every container once and records its
+  normalized creation-configuration hash, immutable image ID, configured
+  image reference, running state, and named-volume attachments.
+- Container configuration hashing reuses the same normalized create mapping
+  as restoration, excluding daemon-generated runtime state and comparing the
+  image separately.
+- Before a rollback plan is built, required existing volumes with snapshot
+  file indexes are deep-scanned and classified as unchanged, changed,
+  missing, or unverifiable.
+- Unchanged volumes are omitted from the mutation plan. Changed volumes show
+  the file-diff summary and are restored; missing volumes are created;
+  legacy/unscannable volumes are marked unverifiable and restored
+  conservatively with a warning.
+- New snapshots persist file indexes for empty volumes too, allowing an empty
+  live volume to compare as unchanged instead of looking like a legacy volume
+  with no index support.
+- Existing containers whose normalized configuration and image identity match
+  the snapshot are retained instead of always being removed/recreated.
+- Running-state-only drift produces start/stop actions without recreation.
+- Changed shared volumes discover every live attached container. Running
+  users, including users outside the selected scope and read-only users, are
+  stopped before the volume restore and restarted afterward if they were
+  previously running. The plan names the shared and out-of-scope impact.
+- Cancellation during deep scanning aborts planning before any mutation.
+- Focused reconciliation, shared-volume, configuration-hash, rollback,
+  Docker mapping, and CLI tests pass; `go vet ./...` and `go test ./...` pass.
+
+Stage 1 intentionally keeps the existing snapshot compatibility path in
+which each container may reference a committed filesystem image object.
+Remaining work begins with the new reference-only container recipe: make a
+container depend on the captured original image entity instead of requiring a
+per-container committed filesystem, then make image loading/tag conflicts
+safe before changing the snapshot format.
+
+### Next implementation stage: reference-only container recipes
+
+#### Current behavior to replace for new snapshots
+
+`captureContainers` currently performs this for every container:
+
+```text
+container -> docker commit -> docker save -> ContainerRecord.ImageObject
+```
+
+Restoration loads that per-container committed image under a deterministic
+`<container>-restored-from-<snapshot>` tag. This remains the compatibility
+path for existing snapshots, but new snapshots should instead store one
+recreation recipe per container and reference image/volume/network entities
+captured once at snapshot scope.
+
+The new default deliberately excludes files written only to the disposable
+container writable layer. Persistent state must live in the captured image,
+a named/anonymous volume, or an explicitly captured bind mount. A future
+opt-in `--include-container-filesystem` mode may retain the old commit-based
+behavior when users need it.
+
+#### Stage 2.1: manifest identity fields
+
+Extend `ContainerRecord` with explicit, optional reference fields while
+retaining `ImageObject` and `LayerHash` for legacy decoding/restoration:
+
+```go
+ImageRef  string // original Config.Image, e.g. openclaw-dev-base:1.0
+ImageID   string // immutable local image ID used by the container
+ImageKey  string // stable link to the snapshot ImageRecord
+ConfigHash string // normalized creation-time configuration
+```
+
+Clarify `ImageRecord` identity instead of overloading its current `Digest`
+field, which may contain either a registry digest or a local image ID:
+
+```go
+ID      string   // immutable local image ID
+Refs    []string // mutable repo tags, provenance only during container restore
+Digests []string // immutable registry digests when present
+Key     string   // canonical manifest/dedup lookup key
+Object  string   // tag-neutral docker-save object
+```
+
+New fields must use backward-compatible JSON encoding. Old manifests with
+only `ImageObject` continue to decode without migration. Update object
+enumeration, portable archive validation, doctor, show/diff, export/import,
+and selected-artifact code so referenced image objects remain reachable.
+
+#### Stage 2.2: dependency-aware capture
+
+Refactor capture into an inventory/dependency flow:
+
+1. Inventory containers and images once.
+2. Build an image-ID-to-`ImageRecord` map.
+3. For each selected container, record its normalized recipe, image ID/ref,
+   mount/network references, configuration hash, and desired running state.
+4. Resolve every selected container's required image to one image record.
+5. Capture each required image once, even when many containers share it.
+6. Do not run `docker commit` for new reference-only records.
+
+Container selection implicitly includes required dependencies. In particular,
+`snapshot --only containers` must still capture the images needed to recreate
+those containers. Document `--only` as selecting primary resources while
+allowing mandatory dependencies to ride along. A volume or network should
+likewise be referenced by the container recipe, while existing scope policy
+decides whether its restorable data/config is included.
+
+Expected storage relationship:
+
+```text
+openclaw_secretary ──┐
+                     ├── one openclaw-dev-base image object
+openclaw_worker ─────┘
+
+openclaw_secretary ──┐
+                     ├── one openclaw_dev_home volume object
+openclaw_worker ─────┘
+```
+
+#### Stage 2.3: tag-neutral image archives
+
+Prevent `docker load` from moving public tags before reconciliation can apply
+policy:
+
+1. Save images by immutable ID, not by the first public tag.
+2. Inspect test archives and prove whether Docker omits `RepoTags` when saving
+   by ID on supported engines.
+3. If public tags remain, rewrite docker-save `manifest.json` (and any legacy
+   repositories metadata) into a tag-neutral archive while preserving config
+   and layer bytes.
+4. Keep original tags only as `ImageRecord.Refs` provenance.
+5. On restore, load the tag-neutral object, verify the resulting identity,
+   and apply only a dockervc-owned internal tag such as
+   `dockervc/restore:<snapshot>-<digest-prefix>`.
+
+Never silently retag `openclaw-dev-base:1.0` or another public reference while
+restoring a container. Explicit standalone image restoration may later offer
+a separate, confirmed retag policy.
+
+#### Stage 2.4: dual-path restore planning
+
+Resolve a selected container's image dependency before deciding whether the
+container needs recreation:
+
+- exact image ID/digest present: reuse it without loading or tagging;
+- required image absent: load its snapshot image object once and assign an
+  internal restore reference;
+- original public tag now points elsewhere: preserve that tag and use the
+  exact snapshot image through the internal reference;
+- several selected containers share the image: emit one load step and give
+  all create steps the same resolved reference.
+
+Add an explicit resolved image reference to `StepCreateContainer` instead of
+having the executor always derive `RestoreTag(snapshotID, containerName)`:
+
+```go
+ImageRef string // exact existing ID or dockervc-owned loaded-image tag
+```
+
+The executor then calls `ContainerCreateFromInspect` with `Step.ImageRef`.
+Planning remains pure; loading/tagging stays in executor steps.
+
+Choose restore format per container:
+
+```text
+new record:    ImageKey/ImageID present -> referenced ImageRecord path
+legacy record: ImageObject present       -> committed-filesystem path
+invalid:       neither path complete     -> unverifiable/not recreatable
+```
+
+Do not remove legacy handling until the supported snapshot-retention window
+explicitly permits a format break.
+
+#### Stage 2.5: status, diff, and user-visible accounting
+
+For reference-only records, container equality is:
+
+```text
+normalized configuration hash
++ immutable image identity
++ desired running state (reported/actioned separately)
+```
+
+Volume and bind-mount content remain independent comparisons. `LayerHash`
+continues to describe only legacy committed-filesystem snapshots or a future
+opt-in writable-layer mode. Update snapshot size/accounting output so one
+shared image is not presented as per-container storage.
+
+Dry-run output must make reuse visible without turning no-ops into executable
+steps, for example:
+
+```text
+container openclaw_secretary
+  configuration  unchanged
+  image          reuse sha256:abc...
+  volume         reuse openclaw_dev_home
+  action         create container only
+```
+
+#### Stage 2.6: required tests
+
+- New manifest JSON round trip, plus old manifest compatibility fixtures.
+- Two containers sharing one image produce one captured image object and one
+  image-load step.
+- `--only containers` captures required images automatically.
+- Locally built, dangling, tagged, registry-digested, and multi-tag images map
+  to the correct stable image record.
+- Tag-neutral archive tests prove restore cannot move a conflicting public
+  tag as a side effect of `docker load`.
+- Missing container with unchanged dependencies creates only the container.
+- Missing image loads once, receives an internal reference, and then creates
+  all dependent containers.
+- Existing exact image is reused without load/tag mutations.
+- Public tag pointing to a different digest is preserved.
+- Configuration-only drift recreates the container while reusing unchanged
+  image, volume, and network entities.
+- Running-state-only drift still uses start/stop without recreation.
+- Legacy `ImageObject` snapshots retain their existing restore behavior.
+- Object reachability, doctor, prune, export/import, and corruption tests
+  cover both manifest generations.
+
+#### Stage 2 completion criteria
+
+- New snapshots create no per-container committed image objects by default.
+- Every recreatable new container resolves to exactly one captured image
+  entity and a complete normalized runtime recipe.
+- Container restore cannot silently move public image tags.
+- Unchanged images/volumes/networks are not rewritten.
+- Missing dependencies are created once and shared correctly.
+- Old snapshots remain restorable and portable.
+- `go vet ./...`, `go test ./...`, Docker integration fixtures, and a manual
+  OpenClaw dry-run/recreate test all pass before release documentation or a
+  version bump is finalized.
+
+### Snapshot container recipe
+
+Conceptually record:
+
+```text
+container: openclaw_secretary
+├── normalized container configuration and hash
+├── image reference
+│   ├── original tag/name
+│   ├── expected immutable digest
+│   └── snapshot image object
+├── mounts
+│   ├── volume name, driver/options, destination and access mode
+│   ├── expected volume content/index hash
+│   └── snapshot volume object
+├── bind-mount host path, destination, access mode and optional content object
+├── network names and normalized configuration hashes
+└── desired state: running or stopped
+```
+
+The manifest references globally content-addressed and deduplicated objects;
+it does not duplicate an image or volume object for every container that uses
+it. Preserve the complete creation-time runtime specification, including
+entrypoint, command, environment, user, working directory, hostname, ports,
+restart policy, labels, health check, resource/security settings, networks,
+and aliases. Exclude runtime-generated IDs, addresses, and sandbox state from
+configuration equality.
+
+### Reconciliation states
+
+For the selected container and its dependency graph, run a deep comparison
+and classify every entity before mutating anything:
+
+| State | Meaning | Default action |
+|---|---|---|
+| Unchanged | Live entity matches the snapshot identity/content | Reuse it untouched |
+| Changed | Same user-facing entity exists but differs | Show the diff and prompt to restore |
+| Missing | Required entity does not exist | Create/load it from the snapshot |
+| Unverifiable | Equality cannot be established safely | Warn and require an explicit decision |
+| Shared conflict | Changing it affects other containers | Show all affected containers and require a group decision |
+
+The dry-run and confirmation UI should show why an entity received its state,
+not merely say that the whole container will be replaced.
+
+### Minimal-action rules
+
+- If container configuration, image, storage, network dependencies, and
+  desired state are all unchanged, do nothing.
+- If only the running state differs, start or stop the existing container;
+  do not recreate it.
+- If only a volume differs, stop affected containers, checkpoint and restore
+  the volume, then restart them; do not recreate an otherwise unchanged
+  container.
+- If creation-time configuration differs, stop/remove the existing container,
+  reuse every unchanged dependency, restore/create only changed or missing
+  dependencies, then recreate the container.
+- If the required image digest differs, load the snapshot image under a
+  dockervc-owned internal tag and recreate the container against that exact
+  image after confirmation.
+- Never delete a named volume merely because its container is recreated.
+
+Example dry-run:
+
+```text
+Restore plan for openclaw_secretary
+
+  container configuration   unchanged     keep
+  image                     unchanged     keep
+  volume openclaw_dev_home  changed       restore in place
+  network bridge            unchanged     keep
+  running state             running       restore after volume
+
+Actions:
+  stop affected containers
+  create safety checkpoint
+  restore openclaw_dev_home in place
+  restart previously running containers
+```
+
+### Deep comparison rules
+
+- Container: compare a normalized creation specification, excluding live
+  status, IDs, assigned IP/MAC addresses, timestamps, and other generated
+  fields.
+- Image: compare immutable image digest/content identity, never the mutable
+  tag alone.
+- Volume: scan the live volume and compare its file index/content hashes with
+  the captured snapshot index. Report created, modified, and deleted files.
+- Bind mount: deep-scan only when its contents were captured and the path can
+  be accessed safely on the Docker host; otherwise mark it external or
+  unverifiable.
+- Network: compare normalized reproducible configuration, excluding runtime
+  endpoint membership and generated IDs.
+- Desired state: compare running/stopped state separately so it never forces a
+  container recreation by itself.
+
+Deep scans should be limited to the selected container's dependency graph,
+emit progress/ETA, support cancellation, and finish before presenting the
+destructive confirmation.
+
+### Image handling
+
+Treat image tags as mutable aliases and digests as identity:
+
+- reuse an existing exact digest without prompting;
+- load a missing digest from its snapshot object;
+- use a deterministic internal restore reference such as
+  `dockervc/restore:<snapshot>-<digest-prefix>`;
+- do not silently move or replace a public tag that now points elsewhere;
+- retain the original tag as recipe/provenance metadata.
+
+The image archive/loading path must be designed so `docker load` cannot
+silently replace conflicting public tags before the conflict policy runs.
+Initially prefer fully archived images; registry-reference and hybrid storage
+modes can be evaluated later.
+
+### Volumes and shared-volume groups
+
+A shared volume is one Docker volume mounted by more than one container. It is
+not a copy per container: every attached container sees the same files. For
+example:
+
+```text
+openclaw_secretary  ──┐
+                      ├── openclaw_dev_home mounted at /home/dev
+openclaw_secretary2 ──┘
+```
+
+Restoring `openclaw_dev_home` for either container changes the data visible to
+both. Before volume restoration, build a dependency map across running and
+stopped containers:
+
+```text
+volume name -> every attached container and its read/write mode
+```
+
+Rules:
+
+- Preserve an existing volume's name and restore its contents in place.
+- Create a missing volume using its recorded name, driver, options, and labels
+  before extracting content.
+- Compare the volume only once even when several selected containers share it.
+- Before clearing a changed volume, take a safety checkpoint and stop every
+  attached container, not only the selected one. This prevents writers and
+  readers from seeing a partially restored state.
+- If an attached container is outside the selected restore scope, show it and
+  require an explicit group decision; default to abort.
+- After restoration, restart only containers that were running beforehand,
+  unless their own snapshot recipe explicitly changes desired state.
+- Treat anonymous volumes as explicit identities internally by recording and
+  reusing Docker's generated source name. Otherwise Docker would create a new
+  empty anonymous volume during container recreation.
+
+Suggested shared-volume prompt:
+
+```text
+Volume openclaw_dev_home has changed.
+
+It is shared by:
+  - openclaw_secretary
+  - openclaw_secretary2
+
+Restoring it changes /home/dev for both containers.
+
+[S] Stop both, checkpoint, restore the volume, and restart them
+[K] Keep the current volume
+[A] Abort
+```
+
+Volume restoration is not atomic: clear-and-extract may fail partway through.
+The safety checkpoint is the recovery mechanism, rerunning must be idempotent,
+and failure output must identify completed, partial, and untouched entities.
+
+### Bind mounts
+
+- If contents were not captured, reuse/remount the host path without changing
+  it and report that its state is external to the snapshot.
+- If contents were captured, compare first and require explicit confirmation
+  before clearing or overwriting changed content.
+- Reject filesystem roots, home roots, symlink escapes, archive traversal, and
+  other unsafe targets.
+- Bind paths belong to the Docker host. For Docker Desktop or a remote daemon,
+  capture and restoration should use a helper container that mounts the path;
+  the dockervc client's local filesystem may not represent the daemon host.
+
+### Proposed restore flow
+
+1. Validate the snapshot manifest and every referenced object/checksum.
+2. Resolve the selected container's full dependency graph, including all live
+   containers sharing its volumes.
+3. Deep-compare the normalized container configuration and all dependencies.
+4. Produce a dry-run reconciliation plan with entity states and exact actions.
+5. If nothing differs, report no changes and exit successfully.
+6. Prompt once with explicit changed/shared/destructive actions, while still
+   allowing policies to be expressed non-interactively by future flags.
+7. Take a safety checkpoint covering all entities that may be changed.
+8. Stop the minimum safe set of containers.
+9. Create/load missing entities and restore only confirmed changed entities.
+10. Recreate the selected container only if its image or creation-time
+    configuration requires it.
+11. Restore desired running states and wait for health checks where available.
+12. Report reused, created, restored, recreated, partial, and failed entities.
+
+### Consistency, safety, and output requirements
+
+- Support app-consistent capture with stopped containers; live capture remains
+  best effort and must warn that databases may require native dumps or future
+  quiesce hooks.
+- Redact environment secrets and other sensitive configuration from plans and
+  logs while retaining what exact local restoration requires.
+- Use restrictive store permissions and revisit portable-backup encryption.
+- Never replace a conflicting image tag, volume content, bind path, network,
+  or container configuration without a visible plan and authorization.
+- Preserve retryability and cancellation cleanup at every stage.
+- Run post-restore health checks, but distinguish application health failure
+  from mechanical restore failure.
+
+### Questions to revisit before implementation
+
+- Should the committed container writable filesystem remain the default exact
+  image source, with the original image digest stored as provenance, or should
+  users be able to declare the writable layer disposable?
+- What precise normalized fields define container and network equality?
+- Which non-interactive flags express restore/keep/abort decisions without
+  embedding prompts in core packages?
+- How should changed shared volumes interact with containers that were not
+  present in the selected snapshot?
+- How should secrets be encrypted in portable archives while remaining usable
+  for exact local restoration?
+- Which bind-mount host/daemon configurations can be supported safely in the
+  first implementation?
 
 ## Verification checklist
 
