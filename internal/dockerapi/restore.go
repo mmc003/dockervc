@@ -7,6 +7,7 @@ package dockerapi
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -265,28 +266,28 @@ func containerCreateConfig(raw []byte, imageName string) (*container.Config, *co
 
 	oh := cj.HostConfig
 	hc := &container.HostConfig{
-		Binds:         oh.Binds,
-		Mounts:        oh.Mounts, // --mount-created containers carry them here, not in Binds
-		LogConfig:     oh.LogConfig,
-		NetworkMode:   oh.NetworkMode, // the container's primary network name
-		PortBindings:  oh.PortBindings,
-		RestartPolicy: oh.RestartPolicy,
-		AutoRemove:    oh.AutoRemove,
-		CapAdd:        oh.CapAdd,
-		CapDrop:       oh.CapDrop,
-		DNS:           oh.DNS,
-		DNSOptions:    oh.DNSOptions,
-		DNSSearch:     oh.DNSSearch,
-		ExtraHosts:    oh.ExtraHosts,
-		IpcMode:       oh.IpcMode,
-		Links:         oh.Links,
-		PidMode:       oh.PidMode,
-		Privileged:    oh.Privileged,
+		Binds:          oh.Binds,
+		Mounts:         oh.Mounts, // --mount-created containers carry them here, not in Binds
+		LogConfig:      oh.LogConfig,
+		NetworkMode:    oh.NetworkMode, // the container's primary network name
+		PortBindings:   oh.PortBindings,
+		RestartPolicy:  oh.RestartPolicy,
+		AutoRemove:     oh.AutoRemove,
+		CapAdd:         oh.CapAdd,
+		CapDrop:        oh.CapDrop,
+		DNS:            oh.DNS,
+		DNSOptions:     oh.DNSOptions,
+		DNSSearch:      oh.DNSSearch,
+		ExtraHosts:     oh.ExtraHosts,
+		IpcMode:        oh.IpcMode,
+		Links:          oh.Links,
+		PidMode:        oh.PidMode,
+		Privileged:     oh.Privileged,
 		ReadonlyRootfs: oh.ReadonlyRootfs,
-		SecurityOpt:   oh.SecurityOpt,
-		Sysctls:       oh.Sysctls,
-		Tmpfs:         oh.Tmpfs,
-		ShmSize:       oh.ShmSize,
+		SecurityOpt:    oh.SecurityOpt,
+		Sysctls:        oh.Sysctls,
+		Tmpfs:          oh.Tmpfs,
+		ShmSize:        oh.ShmSize,
 	}
 	hc.Resources = oh.Resources // wholesale: Memory, NanoCPUs, Cpuset*, Ulimits, Devices, …
 
@@ -308,6 +309,31 @@ func containerCreateConfig(raw []byte, imageName string) (*container.Config, *co
 	}
 
 	return cfg, hc, nc, strings.TrimPrefix(cj.Name, "/"), nil
+}
+
+// ContainerConfigHash fingerprints only the reproducible creation-time
+// configuration of a container. It deliberately ignores the image reference
+// (compared separately by immutable identity) and all daemon-generated state
+// that containerCreateConfig drops. Stored and live inspect JSON therefore
+// compare equal when recreating one from the other would produce the same
+// configuration.
+func ContainerConfigHash(raw []byte) (string, error) {
+	cfg, hc, nc, name, err := containerCreateConfig(raw, "dockervc/reconcile-placeholder:latest")
+	if err != nil {
+		return "", err
+	}
+	payload := struct {
+		Name       string
+		Config     *container.Config
+		HostConfig *container.HostConfig
+		Network    *network.NetworkingConfig
+	}{name, cfg, hc, nc}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshal normalized container configuration: %w", err)
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // ContainerCreateFromInspect re-creates a container from its stored inspect

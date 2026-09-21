@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 
 	"dockervc/internal/dockerapi"
@@ -20,7 +21,8 @@ import (
 type StepKind int
 
 const (
-	StepRemoveContainer StepKind = iota
+	StepStopContainer StepKind = iota
+	StepRemoveContainer
 	StepCreateNetwork
 	StepLoadImage
 	StepRestoreVolume
@@ -32,13 +34,13 @@ const (
 // plan is built up front (dry-runnable) and applied strictly in order.
 type Step struct {
 	Kind        StepKind
-	Name        string   // entity name / image ref
-	Why         string   // "name conflict", "missing", "recorded running"…
-	Skip        bool     // plan-time no-op, shown for honesty in dry-run output
-	ContainerID string   // remove step: live container id
+	Name        string          // entity name / image ref
+	Why         string          // "name conflict", "missing", "recorded running"…
+	Skip        bool            // plan-time no-op, shown for honesty in dry-run output
+	ContainerID string          // remove step: live container id
 	InspectJSON json.RawMessage // network/container steps
-	ObjectHash  string   // image/volume steps (CAS hash)
-	Refs        []string // image re-tags to apply after loading
+	ObjectHash  string          // image/volume steps (CAS hash)
+	Refs        []string        // image re-tags to apply after loading
 	Vol         model.VolumeRecord
 	Running     bool // container step → follow-up start
 }
@@ -46,6 +48,8 @@ type Step struct {
 // String renders the dry-run line for the step.
 func (s Step) String() string {
 	switch s.Kind {
+	case StepStopContainer:
+		return fmt.Sprintf("stop container %s (%s)", s.Name, s.Why)
 	case StepRemoveContainer:
 		return fmt.Sprintf("stop+remove container %s (%s)", s.Name, s.Why)
 	case StepCreateNetwork:
@@ -71,27 +75,60 @@ func (s Step) String() string {
 // LiveState is the engine inventory a plan is built against — everything the
 // conflict/skip decisions need, fetched once.
 type LiveState struct {
-	ContainerIDs    map[string]string // container name → live container ID
-	VolumeNames     map[string]bool
-	NetworkNames    map[string]bool
-	NetworkInspects map[string]json.RawMessage // live network inspect by name (drift check)
-	ImageDigests    map[string]bool            // image IDs + repo digests (capture's dedup key)
-	ImageTags       map[string]bool            // repo tags (docker's "<none>:<none>" excluded)
-	RunningNames    map[string]bool
+	ContainerIDs          map[string]string // container name → live container ID
+	ContainerConfigHashes map[string]string // normalized creation config by name
+	ContainerImages       map[string]string // immutable top-level image ID by name
+	ContainerImageRefs    map[string]string // Config.Image reference by name
+	VolumeNames           map[string]bool
+	VolumeUsers           map[string][]ContainerUse // volume name → every live attachment
+	VolumeStates          map[string]EntityState    // populated by deep reconciliation
+	VolumeDiffs           map[string]string         // human-readable deep diff result
+	NetworkNames          map[string]bool
+	NetworkInspects       map[string]json.RawMessage // live network inspect by name (drift check)
+	ImageDigests          map[string]bool            // image IDs + repo digests (capture's dedup key)
+	ImageTags             map[string]bool            // repo tags (docker's "<none>:<none>" excluded)
+	RunningNames          map[string]bool
 }
+
+// ContainerUse records one live attachment to a named/anonymous volume.
+// ReadOnly users still need stopping during an in-place restore so they never
+// observe a half-restored filesystem.
+type ContainerUse struct {
+	Name     string
+	ID       string
+	Running  bool
+	ReadOnly bool
+}
+
+// EntityState is the result of reconciling one snapshot entity with the live
+// engine before any restore mutation begins.
+type EntityState string
+
+const (
+	EntityUnchanged    EntityState = "unchanged"
+	EntityChanged      EntityState = "changed"
+	EntityMissing      EntityState = "missing"
+	EntityUnverifiable EntityState = "unverifiable"
+)
 
 // FetchLiveState inventories the engine. Network inspects ride along because
 // reusing an existing network is only honest when it still matches what the
 // snapshot recorded.
 func FetchLiveState(ctx context.Context, cli *dockerapi.Client) (*LiveState, error) {
 	ls := &LiveState{
-		ContainerIDs:    map[string]string{},
-		VolumeNames:     map[string]bool{},
-		NetworkNames:    map[string]bool{},
-		NetworkInspects: map[string]json.RawMessage{},
-		ImageDigests:    map[string]bool{},
-		ImageTags:       map[string]bool{},
-		RunningNames:    map[string]bool{},
+		ContainerIDs:          map[string]string{},
+		ContainerConfigHashes: map[string]string{},
+		ContainerImages:       map[string]string{},
+		ContainerImageRefs:    map[string]string{},
+		VolumeNames:           map[string]bool{},
+		VolumeUsers:           map[string][]ContainerUse{},
+		VolumeStates:          map[string]EntityState{},
+		VolumeDiffs:           map[string]string{},
+		NetworkNames:          map[string]bool{},
+		NetworkInspects:       map[string]json.RawMessage{},
+		ImageDigests:          map[string]bool{},
+		ImageTags:             map[string]bool{},
+		RunningNames:          map[string]bool{},
 	}
 
 	cts, err := cli.ListContainers(ctx)
@@ -104,8 +141,34 @@ func FetchLiveState(ctx context.Context, cli *dockerapi.Client) (*LiveState, err
 		}
 		name := strings.TrimPrefix(ct.Names[0], "/")
 		ls.ContainerIDs[name] = ct.ID
-		if strings.Contains(string(ct.State), "running") {
+		inspect, err := cli.InspectContainer(ctx, ct.ID)
+		if err != nil {
+			return nil, fmt.Errorf("inspect container %s: %w", name, err)
+		}
+		raw, err := json.Marshal(inspect)
+		if err != nil {
+			return nil, fmt.Errorf("marshal container %s inspect: %w", name, err)
+		}
+		if hash, err := dockerapi.ContainerConfigHash(raw); err == nil {
+			ls.ContainerConfigHashes[name] = hash
+		} else {
+			return nil, fmt.Errorf("normalize container %s configuration: %w", name, err)
+		}
+		ls.ContainerImages[name] = inspect.Image
+		if inspect.Config != nil {
+			ls.ContainerImageRefs[name] = inspect.Config.Image
+		}
+		running := inspect.State != nil && inspect.State.Running
+		if running {
 			ls.RunningNames[name] = true
+		}
+		for _, mnt := range inspect.Mounts {
+			if string(mnt.Type) != "volume" || mnt.Name == "" {
+				continue
+			}
+			ls.VolumeUsers[mnt.Name] = append(ls.VolumeUsers[mnt.Name], ContainerUse{
+				Name: name, ID: ct.ID, Running: running, ReadOnly: !mnt.RW,
+			})
 		}
 	}
 
@@ -383,17 +446,112 @@ func BuildPlan(m *model.Manifest, live *LiveState, scope Scope) (steps []Step, w
 		}
 	}
 
-	// 1. Stop+remove conflicting containers — unique names block create, and
-	// running holders pin the volumes/networks later steps replace.
+	// Decide whether each selected container actually needs recreation. Missing
+	// containers do; live containers are retained when their normalized create
+	// configuration and immutable image identity still match the snapshot.
+	recreate := map[string]bool{}
+	selectedNames := map[string]bool{}
+	removeIDs := map[string]bool{}
+	removeSteps := []Step{}
 	for i := range selC {
 		crec := &selC[i]
-		if id, ok := live.ContainerIDs[crec.Name]; ok {
-			steps = append(steps, Step{
+		selectedNames[crec.Name] = true
+		id, exists := live.ContainerIDs[crec.Name]
+		if !exists {
+			recreate[crec.Name] = true
+			continue
+		}
+		reason, changed, err := containerRecreateReason(m.ID, crec, live)
+		if err != nil {
+			changed = true
+			reason = "configuration could not be compared"
+			warn("container %s configuration is unverifiable (%v); it will be recreated", crec.Name, err)
+		}
+		if changed {
+			recreate[crec.Name] = true
+			removeIDs[id] = true
+			removeSteps = append(removeSteps, Step{
 				Kind: StepRemoveContainer, Name: crec.Name,
-				ContainerID: id, Why: "name conflict",
+				ContainerID: id, Why: reason,
 			})
 		}
 	}
+
+	// Determine which volumes actually require mutation. A missing deep-scan
+	// classification preserves legacy behavior for callers that have not run
+	// ReconcileVolumes; the CLI always does so before building a real plan.
+	restoreVolumes := map[string]bool{}
+	for i := range m.Volumes {
+		vrec := &m.Volumes[i]
+		if !needVolumes[vrec.Name] {
+			continue
+		}
+		state, classified := live.VolumeStates[vrec.Name]
+		restoreVolumes[vrec.Name] = !classified || state != EntityUnchanged
+	}
+
+	// 1. Stop the minimum safe live set before removals or volume mutation.
+	// A changed shared volume pulls in every attached container, including
+	// unselected readers, so nobody can write to or observe a partial restore.
+	stopByID := map[string]Step{}
+	restartByID := map[string]Step{}
+	for i := range m.Volumes {
+		vrec := &m.Volumes[i]
+		if !restoreVolumes[vrec.Name] || !live.VolumeNames[vrec.Name] {
+			continue
+		}
+		users := sortedVolumeUsers(live.VolumeUsers[vrec.Name])
+		if len(users) > 1 {
+			names := make([]string, 0, len(users))
+			for _, user := range users {
+				names = append(names, user.Name)
+			}
+			warn("volume %s is shared by %s; all attached containers are stopped for its restore",
+				vrec.Name, strings.Join(names, ", "))
+		}
+		for _, user := range users {
+			if !user.Running || removeIDs[user.ID] {
+				continue
+			}
+			stopByID[user.ID] = Step{Kind: StepStopContainer, Name: user.Name,
+				ContainerID: user.ID, Why: "uses volume " + vrec.Name}
+			if !selectedNames[user.Name] {
+				warn("container %s is outside the selected scope but uses volume %s; it will be stopped and restarted",
+					user.Name, vrec.Name)
+			}
+			restartByID[user.ID] = Step{Kind: StepStartContainer, Name: user.Name,
+				ContainerID: user.ID, Why: "was running before shared volume restore"}
+		}
+	}
+
+	// Running-state drift alone never recreates a matching container.
+	for i := range selC {
+		crec := &selC[i]
+		id, exists := live.ContainerIDs[crec.Name]
+		if !exists || recreate[crec.Name] {
+			continue
+		}
+		liveRunning := live.RunningNames[crec.Name]
+		switch {
+		case liveRunning && !crec.Running:
+			stopByID[id] = Step{Kind: StepStopContainer, Name: crec.Name,
+				ContainerID: id, Why: "snapshot recorded stopped"}
+			delete(restartByID, id)
+		case !liveRunning && crec.Running:
+			restartByID[id] = Step{Kind: StepStartContainer, Name: crec.Name,
+				ContainerID: id, Why: "snapshot recorded running"}
+		}
+	}
+
+	stopIDs := make([]string, 0, len(stopByID))
+	for id := range stopByID {
+		stopIDs = append(stopIDs, id)
+	}
+	sort.Strings(stopIDs)
+	for _, id := range stopIDs {
+		steps = append(steps, stopByID[id])
+	}
+	steps = append(steps, removeSteps...)
 
 	// 2. Create missing networks (reuse existing ones, never delete).
 	for i := range m.Networks {
@@ -460,14 +618,14 @@ func BuildPlan(m *model.Manifest, live *LiveState, scope Scope) (steps []Step, w
 	fsOwners := map[string][]string{} // object hash → container names, first-seen
 	for i := range selC {
 		crec := &selC[i]
-		if crec.ImageObject != "" {
+		if recreate[crec.Name] && crec.ImageObject != "" {
 			fsOwners[crec.ImageObject] = append(fsOwners[crec.ImageObject], crec.Name)
 		}
 	}
 	seenHash := map[string]bool{}
 	for i := range selC {
 		crec := &selC[i]
-		if crec.ImageObject == "" || seenHash[crec.ImageObject] {
+		if !recreate[crec.Name] || crec.ImageObject == "" || seenHash[crec.ImageObject] {
 			continue
 		}
 		seenHash[crec.ImageObject] = true
@@ -496,11 +654,23 @@ func BuildPlan(m *model.Manifest, live *LiveState, scope Scope) (steps []Step, w
 	// restored content. Clear-then-copy: post-snapshot files do not survive.
 	for i := range m.Volumes {
 		vrec := &m.Volumes[i]
-		if !needVolumes[vrec.Name] {
+		if !needVolumes[vrec.Name] || !restoreVolumes[vrec.Name] {
 			continue
 		}
 		why := "missing"
-		if live.VolumeNames[vrec.Name] {
+		if state, ok := live.VolumeStates[vrec.Name]; ok {
+			detail := live.VolumeDiffs[vrec.Name]
+			switch state {
+			case EntityChanged:
+				why = "changed: " + detail
+				warn("volume %s changed (%s) — its contents are restored from the snapshot", vrec.Name, detail)
+			case EntityMissing:
+				why = "missing"
+			case EntityUnverifiable:
+				why = "unverifiable; contents will be replaced"
+				warn("volume %s could not be compared (%s) — its contents are restored conservatively", vrec.Name, detail)
+			}
+		} else if live.VolumeNames[vrec.Name] {
 			why = "contents will be replaced"
 			warn("volume %s exists — its current contents are replaced by the snapshot's", vrec.Name)
 		}
@@ -513,6 +683,9 @@ func BuildPlan(m *model.Manifest, live *LiveState, scope Scope) (steps []Step, w
 	// 5. Create containers, in manifest order.
 	for i := range selC {
 		crec := &selC[i]
+		if !recreate[crec.Name] {
+			continue
+		}
 		if crec.ImageObject == "" {
 			warn("container %s has no committed filesystem in the snapshot; not recreated", crec.Name)
 			continue
@@ -527,13 +700,21 @@ func BuildPlan(m *model.Manifest, live *LiveState, scope Scope) (steps []Step, w
 	// 6. Start recorded-running containers — last, after peers/deps exist.
 	for i := range selC {
 		crec := &selC[i]
-		if crec.ImageObject == "" || !crec.Running {
+		if !recreate[crec.Name] || crec.ImageObject == "" || !crec.Running {
 			continue
 		}
 		steps = append(steps, Step{
 			Kind: StepStartContainer, Name: crec.Name,
 			Why: "recorded running",
 		})
+	}
+	restartIDs := make([]string, 0, len(restartByID))
+	for id := range restartByID {
+		restartIDs = append(restartIDs, id)
+	}
+	sort.Strings(restartIDs)
+	for _, id := range restartIDs {
+		steps = append(steps, restartByID[id])
 	}
 
 	return steps, warnings
@@ -619,6 +800,37 @@ func imageDisplayName(rec *model.ImageRecord) string {
 		return rec.Refs[0]
 	}
 	return shortRef(rec.Digest)
+}
+
+func containerRecreateReason(snapshotID string, rec *model.ContainerRecord,
+	live *LiveState) (reason string, changed bool, err error) {
+	wantHash, err := dockerapi.ContainerConfigHash(rec.InspectJSON)
+	if err != nil {
+		return "", false, err
+	}
+	gotHash, comparable := live.ContainerConfigHashes[rec.Name]
+	if !comparable {
+		// Backward-compatible behavior for hand-built LiveState values and any
+		// future engine that cannot expose a comparable inspect shape.
+		return "name conflict", true, nil
+	}
+	if gotHash != wantHash {
+		return "configuration changed", true, nil
+	}
+
+	var stored struct {
+		Image string `json:"Image"`
+	}
+	if err := json.Unmarshal(rec.InspectJSON, &stored); err != nil {
+		return "", false, fmt.Errorf("parse stored image identity: %w", err)
+	}
+	liveImage := live.ContainerImages[rec.Name]
+	liveRef := strings.TrimSuffix(live.ContainerImageRefs[rec.Name], ":latest")
+	restoreRef := strings.TrimSuffix(RestoreTag(snapshotID, rec.Name), ":latest")
+	if stored.Image != "" && liveImage != stored.Image && liveRef != restoreRef {
+		return "image changed", true, nil
+	}
+	return "unchanged", false, nil
 }
 
 // containerDeps pulls the dependency names out of a stored container inspect

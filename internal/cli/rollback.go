@@ -33,10 +33,12 @@ var rollbackCmd = &cobra.Command{
 
 Selects entities by name (plus their dependencies: a container pulls in its
 filesystem image, mounted volumes and networks), or --all for everything.
-Containers with the same name are stopped and removed; volume contents are
-replaced exactly (clear-then-copy); existing networks and images are reused,
-never deleted. Unless --keep-current, a pre-rollback checkpoint snapshot is
-taken first, so the rollback itself can be rolled back.`,
+Existing container configuration and required volumes are compared first.
+Unchanged entities are reused, changed volume contents are replaced exactly
+(clear-then-copy), and missing entities are created. Containers are recreated
+only when their configuration or image changed. Unless --keep-current, a
+pre-rollback checkpoint snapshot is taken first, so the rollback itself can
+be rolled back.`,
 	Args:        cobra.ExactArgs(1),
 	Annotations: map[string]string{needsStore: "true"},
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -69,6 +71,10 @@ taken first, so the rollback itself can be rolled back.`,
 		live, err := rollback.FetchLiveState(ctx, dcli)
 		if err != nil {
 			return fmt.Errorf("inspect live engine: %w", err)
+		}
+		if err := rollback.ReconcileVolumes(ctx, dcli.VolumeTarStream, st.OpenObject, m, scope, live,
+			commandProgress(cmd.ErrOrStderr())); err != nil {
+			return fmt.Errorf("compare required volumes: %w", err)
 		}
 
 		steps, warnings := rollback.BuildPlan(m, live, scope)

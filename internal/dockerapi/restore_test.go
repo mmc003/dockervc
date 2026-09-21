@@ -1,6 +1,7 @@
 package dockerapi
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/docker/docker/api/types/network"
@@ -198,5 +199,40 @@ func TestContainerCreateConfig(t *testing.T) {
 	}
 	if ep.NetworkID != "" || ep.IPAddress != "" || ep.MacAddress != "" || len(ep.DNSNames) != 0 {
 		t.Fatalf("operational endpoint fields leaked: %+v", ep)
+	}
+}
+
+func TestContainerConfigHashIgnoresRuntimeStateAndImage(t *testing.T) {
+	original := []byte(containerInspectJSON)
+	var changed map[string]any
+	if err := json.Unmarshal(original, &changed); err != nil {
+		t.Fatal(err)
+	}
+	changed["Image"] = "sha256:a-different-runtime-image"
+	changed["State"] = map[string]any{"Running": false, "Pid": 99999}
+	networks := changed["NetworkSettings"].(map[string]any)["Networks"].(map[string]any)
+	networks["demo-net"].(map[string]any)["IPAddress"] = "172.18.0.250"
+	runtimeOnly, _ := json.Marshal(changed)
+
+	want, err := ContainerConfigHash(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ContainerConfigHash(runtimeOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("runtime-only drift changed config hash: %s != %s", got, want)
+	}
+
+	changed["Config"].(map[string]any)["WorkingDir"] = "/different"
+	creationChange, _ := json.Marshal(changed)
+	got, err = ContainerConfigHash(creationChange)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == want {
+		t.Fatal("creation-time configuration change did not change hash")
 	}
 }

@@ -87,6 +87,9 @@ func pluralSkipped(n int) string {
 func (e *Executor) applyStep(ctx context.Context, p *Plan, s Step,
 	containerIDs map[string]string) error {
 	switch s.Kind {
+	case StepStopContainer:
+		return e.Cli.StopContainer(ctx, s.ContainerID, 30)
+
 	case StepRemoveContainer:
 		// Graceful stop first; a stop failure (already stopped, wedge) is a
 		// warning — the force-remove below is the real action.
@@ -148,6 +151,9 @@ func (e *Executor) applyStep(ctx context.Context, p *Plan, s Step,
 
 	case StepStartContainer:
 		id := containerIDs[s.Name]
+		if s.ContainerID != "" {
+			id = s.ContainerID
+		}
 		if id == "" {
 			return fmt.Errorf("no container named %s was created in this run", s.Name)
 		}

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"dockervc/internal/dockerapi"
 	"dockervc/internal/model"
 )
 
@@ -15,7 +16,8 @@ import (
 // that shares the worker's (deduplicated) filesystem object.
 func fixtureManifest() *model.Manifest {
 	webInspect, _ := json.Marshal(map[string]any{
-		"Name": "/demo-web",
+		"Name":   "/demo-web",
+		"Image":  "sha256:webbase",
 		"Config": map[string]any{"Image": "nginx:alpine", "Env": []string{"K=V"}},
 		"HostConfig": map[string]any{
 			"NetworkMode":  "demo-net",
@@ -26,19 +28,21 @@ func fixtureManifest() *model.Manifest {
 		},
 	})
 	workerInspect, _ := json.Marshal(map[string]any{
-		"Name": "/demo-worker",
+		"Name":  "/demo-worker",
+		"Image": "sha256:workerbase",
 		"Config": map[string]any{"Image": "busybox:latest",
 			"Cmd": []any{"sh", "-c", "while true; do sleep 5; done"}},
-		"HostConfig":    map[string]any{"Binds": []any{"demo-data:/data"}, "NetworkMode": "demo-net"},
-		"Mounts":        []any{map[string]any{"Type": "volume", "Name": "demo-data", "Destination": "/data"}},
+		"HostConfig": map[string]any{"Binds": []any{"demo-data:/data"}, "NetworkMode": "demo-net"},
+		"Mounts":     []any{map[string]any{"Type": "volume", "Name": "demo-data", "Destination": "/data"}},
 		"NetworkSettings": map[string]any{
 			"Networks": map[string]any{"demo-net": map[string]any{}},
 		},
 	})
 	sidecarInspect, _ := json.Marshal(map[string]any{
-		"Name":           "/demo-sidecar",
-		"Config":         map[string]any{"Image": "busybox:latest", "Cmd": []any{"sleep", "infinity"}},
-		"HostConfig":     map[string]any{"NetworkMode": "bridge"},
+		"Name":            "/demo-sidecar",
+		"Image":           "sha256:workerbase",
+		"Config":          map[string]any{"Image": "busybox:latest", "Cmd": []any{"sleep", "infinity"}},
+		"HostConfig":      map[string]any{"NetworkMode": "bridge"},
 		"NetworkSettings": map[string]any{"Networks": map[string]any{"bridge": map[string]any{}}},
 	})
 	netInspect, _ := json.Marshal(map[string]any{
@@ -76,11 +80,30 @@ func fixtureManifest() *model.Manifest {
 // liveEmpty: an engine with nothing — every step fires.
 func liveEmpty() *LiveState {
 	return &LiveState{
-		ContainerIDs: map[string]string{}, VolumeNames: map[string]bool{},
+		ContainerIDs: map[string]string{}, ContainerConfigHashes: map[string]string{},
+		ContainerImages: map[string]string{}, ContainerImageRefs: map[string]string{},
+		VolumeNames: map[string]bool{}, VolumeUsers: map[string][]ContainerUse{},
+		VolumeStates: map[string]EntityState{}, VolumeDiffs: map[string]string{},
 		NetworkNames: map[string]bool{}, NetworkInspects: map[string]json.RawMessage{},
 		ImageDigests: map[string]bool{}, ImageTags: map[string]bool{},
 		RunningNames: map[string]bool{},
 	}
+}
+
+func markContainerUnchanged(t *testing.T, ls *LiveState, rec model.ContainerRecord) {
+	t.Helper()
+	hash, err := dockerapi.ContainerConfigHash(rec.InspectJSON)
+	if err != nil {
+		t.Fatalf("hash container config: %v", err)
+	}
+	ls.ContainerConfigHashes[rec.Name] = hash
+	var facts struct {
+		Image string `json:"Image"`
+	}
+	if err := json.Unmarshal(rec.InspectJSON, &facts); err != nil {
+		t.Fatalf("parse image identity: %v", err)
+	}
+	ls.ContainerImages[rec.Name] = facts.Image
 }
 
 // liveConflict: the demo containers/volumes/network/images exist — removals,
@@ -295,6 +318,72 @@ func TestBuildPlanSkipsLoadedFilesystems(t *testing.T) {
 	}
 	if s := findStep(steps, StepLoadImage, "busybox:latest"); s == nil || s.Skip {
 		t.Fatalf("busybox absent from engine — must load: %+v", s)
+	}
+}
+
+func TestBuildPlanKeepsUnchangedContainer(t *testing.T) {
+	m := fixtureManifest()
+	ls := liveEmpty()
+	rec := m.Containers[0]
+	ls.ContainerIDs[rec.Name] = "live-web"
+	ls.RunningNames[rec.Name] = true
+	ls.NetworkNames["demo-net"] = true
+	markContainerUnchanged(t, ls, rec)
+
+	steps, warns := BuildPlan(m, ls, Scope{Containers: []string{rec.Name}})
+	if len(steps) != 0 {
+		t.Fatalf("unchanged container should require no actions:\n%s", stepList(steps))
+	}
+	if len(warns) != 0 {
+		t.Fatalf("unchanged container warnings: %v", warns)
+	}
+}
+
+func TestBuildPlanUnchangedVolumeRequiresNoAction(t *testing.T) {
+	m := fixtureManifest()
+	ls := liveEmpty()
+	ls.VolumeNames["demo-data"] = true
+	ls.VolumeStates["demo-data"] = EntityUnchanged
+	ls.VolumeDiffs["demo-data"] = "file contents match"
+
+	steps, _ := BuildPlan(m, ls, Scope{Volumes: []string{"demo-data"}})
+	if len(steps) != 0 {
+		t.Fatalf("unchanged volume should require no actions:\n%s", stepList(steps))
+	}
+}
+
+func TestBuildPlanChangedSharedVolumeStopsAndRestartsUsers(t *testing.T) {
+	m := fixtureManifest()
+	ls := liveEmpty()
+	ls.VolumeNames["demo-data"] = true
+	ls.VolumeStates["demo-data"] = EntityChanged
+	ls.VolumeDiffs["demo-data"] = "+1 created, ~2 modified"
+	ls.VolumeUsers["demo-data"] = []ContainerUse{
+		{Name: "demo-worker", ID: "worker-id", Running: true},
+		{Name: "observer", ID: "observer-id", Running: true, ReadOnly: true},
+	}
+	ls.ContainerIDs["demo-worker"] = "worker-id"
+	ls.ContainerIDs["observer"] = "observer-id"
+	ls.RunningNames["demo-worker"] = true
+	ls.RunningNames["observer"] = true
+
+	steps, warns := BuildPlan(m, ls, Scope{Volumes: []string{"demo-data"}})
+	for _, tc := range []struct {
+		kind StepKind
+		name string
+	}{
+		{StepStopContainer, "demo-worker"},
+		{StepStopContainer, "observer"},
+		{StepRestoreVolume, "demo-data"},
+		{StepStartContainer, "demo-worker"},
+		{StepStartContainer, "observer"},
+	} {
+		if findStep(steps, tc.kind, tc.name) == nil {
+			t.Fatalf("missing shared-volume action %v/%s:\n%s", tc.kind, tc.name, stepList(steps))
+		}
+	}
+	if !hasStr(warns, "shared by") || !hasStr(warns, "outside the selected scope") {
+		t.Fatalf("shared-volume warnings missing: %v", warns)
 	}
 }
 

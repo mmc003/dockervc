@@ -328,7 +328,10 @@ func (c *Capturer) captureVolumes(ctx context.Context) error {
 			Object:  obj.Hash,
 			Size:    obj.Size,
 		}
-		if idx != nil && len(idx.Files) > 0 {
+		// Persist even an empty index. An empty volume is a known state that
+		// reconciliation can compare exactly; omitting its index would make it
+		// indistinguishable from a legacy snapshot that predates indexing.
+		if idx != nil {
 			iobj, err := c.St.PutBlob("volindex", "", idx.Reader())
 			if err != nil {
 				return fmt.Errorf("store file index for %s: %w", v.Name, err)
