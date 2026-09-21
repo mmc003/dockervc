@@ -1,10 +1,8 @@
 # dockervc — Local Version Control & Backup for Docker
 
-**Status:** Steps 1–3 complete (snapshot engine, CAS store, TUI, volume file
-indexes, rollback). Step 4 (export/import) is specified but not implemented —
-**see [HANDOFF.md](HANDOFF.md) for the implementation brief**;
-this document is the architecture intent, HANDOFF.md is ground truth for what
-exists in code today.
+**Status:** Steps 1–5 are implemented, including rollback, portable
+export/import, archive inspection, Windows support, and selective resource
+exports. See [HANDOFF.md](HANDOFF.md) for implementation history.
 **Target:** Linux and macOS hosts; 100% local operation, no cloud
 dependencies. Host-to-host migration via export/import is the primary
 deployment story (see §5). (Windows support shipped broken in v0.5.0 and was
@@ -157,7 +155,11 @@ dockervc rollback <snap>                          # interactive scope prompt
 # ── Portability ─────────────────────────────────────────────────────────────────
 dockervc export   <snap> -o state.dvca            # single-file portable archive
                   [--latest]                      # [--split 4g] deferred
-dockervc archive  list [directory]                # fast manifest-only export listing
+dockervc export   <snap|latest> --volume <name>   # standard volume tar
+                  [--path <path>] [--raw]         # filtered tar or one plain file
+dockervc export   <snap|latest> --image <ref>     # Docker-save tar
+dockervc files    <snap|latest> <volume> [prefix] # browse local captured files
+dockervc archive  list [directory]                # list archives + indexed partial exports
 dockervc archive  show state.dvca                 # inspect without importing
 dockervc archive  verify state.dvca               # full structure + checksum pass
 dockervc archive  files state.dvca <volume> [path] # list an archived volume index
@@ -213,6 +215,13 @@ the snapshot — after which `rollback` works exactly as on the source machine.
 Machine-independence: no absolute paths in the manifest are load-bearing;
 engine-specific fields (engine id, container IDs) are recorded but never
 required for restore. (Exact algorithms and edge cases: HANDOFF.md §5.)
+
+Selective exports are ordinary tar files, or one plain file with `--raw`; they
+are recovery artifacts rather than importable snapshot bundles. With no `-o`,
+they are placed under `exports/<snapshot-id>/` (or `export.folder`) in
+`volumes/`, `images/`, `selections/`, or `raw/`, and registered in an atomic
+`export-index.json`. The exporter authenticates the complete compressed CAS
+object while streaming and publishes through a sibling temporary file.
 
 ---
 

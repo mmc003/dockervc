@@ -23,6 +23,9 @@ type archiveListRow struct {
 	Path     string
 	Size     int64
 	Modified time.Time
+	Created  time.Time
+	Snapshot string
+	Type     string
 	Manifest *model.Manifest
 	Err      error
 }
@@ -39,7 +42,7 @@ captured file index for one volume.`,
 
 var archiveListCmd = &cobra.Command{
 	Use:   "list [directory]",
-	Short: "List exported .dvca archives",
+	Short: "List exported archives and selective artifacts",
 	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		dir := defaultExportDir()
@@ -60,18 +63,18 @@ var archiveListCmd = &cobra.Command{
 			fmt.Printf("No exported archives in %s.\n", dir)
 			return nil
 		}
-		fmt.Printf("archives in %s\n", dir)
-		fmt.Printf("%-20s %-10s %-28s %s\n", "CREATED", "SIZE", "SNAPSHOT", "FILE")
+		fmt.Printf("archives in %s (including selective exports)\n", dir)
+		fmt.Printf("%-20s %-10s %-28s %-12s %s\n", "CREATED", "SIZE", "SNAPSHOT", "TYPE", "FILE")
 		for _, row := range rows {
 			if row.Err != nil {
-				fmt.Printf("%-20s %-10s %-28s %s  [unreadable: %v]\n",
-					row.Modified.Local().Format("2006-01-02 15:04"), snapshot.HumanBytes(row.Size), "-",
-					filepath.Base(row.Path), row.Err)
+				fmt.Printf("%-20s %-10s %-28s %-12s %s  [unreadable: %v]\n",
+					row.Modified.Local().Format("2006-01-02 15:04"), snapshot.HumanBytes(row.Size), row.Snapshot,
+					row.Type, displayExportPath(dir, row.Path), row.Err)
 				continue
 			}
-			fmt.Printf("%-20s %-10s %-28s %s\n",
-				row.Manifest.CreatedAt.Local().Format("2006-01-02 15:04"), snapshot.HumanBytes(row.Size),
-				row.Manifest.ID, filepath.Base(row.Path))
+			fmt.Printf("%-20s %-10s %-28s %-12s %s\n",
+				row.Created.Local().Format("2006-01-02 15:04"), snapshot.HumanBytes(row.Size),
+				row.Snapshot, row.Type, displayExportPath(dir, row.Path))
 		}
 		return nil
 	},
@@ -172,12 +175,71 @@ func scanArchives(dir string) ([]archiveListRow, error) {
 			continue
 		}
 		m, peekErr := portable.PeekArchive(archivePath)
+		created := fi.ModTime()
+		snapshotID := "-"
+		if m != nil {
+			created = m.CreatedAt
+			snapshotID = m.ID
+		}
 		rows = append(rows, archiveListRow{
-			Path: archivePath, Size: fi.Size(), Modified: fi.ModTime(), Manifest: m, Err: peekErr,
+			Path: archivePath, Size: fi.Size(), Modified: fi.ModTime(), Created: created,
+			Snapshot: snapshotID, Type: "snapshot", Manifest: m, Err: peekErr,
 		})
 	}
+	rows = append(rows, scanPartialExports(dir, entries)...)
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Modified.After(rows[j].Modified) })
 	return rows, nil
+}
+
+func scanPartialExports(root string, entries []os.DirEntry) []archiveListRow {
+	var rows []archiveListRow
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		base := filepath.Join(root, entry.Name())
+		indexPath := filepath.Join(base, "export-index.json")
+		b, err := os.ReadFile(indexPath)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			rows = append(rows, archiveListRow{Path: indexPath, Snapshot: entry.Name(), Type: "index", Err: err})
+			continue
+		}
+		var idx exportIndex
+		if err := json.Unmarshal(b, &idx); err != nil {
+			rows = append(rows, archiveListRow{Path: indexPath, Snapshot: entry.Name(), Type: "index", Err: err})
+			continue
+		}
+		for _, item := range idx.Artifacts {
+			artifactPath := filepath.Join(base, filepath.FromSlash(item.File))
+			rel, relErr := filepath.Rel(base, artifactPath)
+			if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(item.File) {
+				rows = append(rows, archiveListRow{Path: indexPath, Snapshot: idx.SnapshotID, Type: item.Type, Err: fmt.Errorf("unsafe indexed path %q", item.File)})
+				continue
+			}
+			fi, statErr := os.Stat(artifactPath)
+			modified := item.CreatedAt
+			size := item.Size
+			if fi != nil {
+				modified = fi.ModTime()
+				size = fi.Size()
+			}
+			rows = append(rows, archiveListRow{
+				Path: artifactPath, Size: size, Modified: modified, Created: item.CreatedAt,
+				Snapshot: idx.SnapshotID, Type: item.Type + "/" + item.Format, Err: statErr,
+			})
+		}
+	}
+	return rows
+}
+
+func displayExportPath(root, value string) string {
+	if rel, err := filepath.Rel(root, value); err == nil {
+		return rel
+	}
+	return value
 }
 
 func printArchiveManifest(archivePath string, archiveSize int64, m *model.Manifest) {

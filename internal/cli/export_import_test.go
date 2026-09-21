@@ -249,6 +249,10 @@ func TestResetCommandFlagsExportImport(t *testing.T) {
 		out    string
 		latest bool
 		split  string
+		volume string
+		image  string
+		path   string
+		raw    bool
 	}{}) {
 		t.Fatalf("exportOpts leaked: %+v", exportOpts)
 	}

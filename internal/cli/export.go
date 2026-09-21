@@ -21,19 +21,30 @@ var exportOpts struct {
 	out    string
 	latest bool
 	split  string
+	volume string
+	image  string
+	path   string
+	raw    bool
 }
 
 var exportCmd = &cobra.Command{
-	Use:   "export <snapshot> [-o <file.dvca>]",
-	Short: "Package a snapshot into a portable .dvca archive",
-	Long: `Package a snapshot into a portable .dvca archive.
+	Use:   "export <snapshot|latest> [resource flags] [-o <file>]",
+	Short: "Export a snapshot or one captured resource",
+	Long: `Export a whole snapshot or one captured resource.
 
-The archive is an uncompressed outer tar holding the manifest, every object
+With no resource selector, the output is a portable .dvca archive: an
+uncompressed outer tar holding the manifest, every object
 it references (verbatim) and a GNU-sha256sum-style checksums file, so it can
 be copied anywhere and imported with ` + "`dockervc import`" + `. Without -o it
 lands in an exports/ folder in the current directory (created on demand) as
 <snapshot-id>.dvca; set a different default folder with
-` + "`dockervc config set export.folder <dir>`" + `.`,
+` + "`dockervc config set export.folder <dir>`" + `.
+
+Use --volume or --image to export one resource as a standard tar. Combine
+--volume with --path for a filtered tar, or add --raw to emit one regular
+file. Default selective outputs are organized below exports/<snapshot-id>/
+and recorded in export-index.json. Selective outputs are not importable .dvca
+snapshot bundles.`,
 	Args:        cobra.MaximumNArgs(1),
 	Annotations: map[string]string{needsStore: "true"},
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -56,6 +67,15 @@ lands in an exports/ folder in the current directory (created on demand) as
 				return fmt.Errorf("no snapshots yet — take one first (`dockervc snapshot -m …`)")
 			}
 			m = latest
+		case len(args) == 1 && strings.EqualFold(args[0], "latest"):
+			latest, err := st.LatestSnapshot()
+			if err != nil {
+				return err
+			}
+			if latest == nil {
+				return fmt.Errorf("no snapshots yet — take one first (`dockervc snapshot -m …`)")
+			}
+			m = latest
 		case len(args) == 1:
 			got, err := st.GetSnapshot(args[0])
 			if err != nil {
@@ -66,8 +86,14 @@ lands in an exports/ folder in the current directory (created on demand) as
 			return fmt.Errorf("pass a snapshot id or --latest")
 		}
 
-		// Broken snapshots are refused — the same gate rollback uses. An
-		// archive of a broken snapshot would look complete while missing data.
+		if exportOpts.volume != "" || exportOpts.image != "" || exportOpts.path != "" || exportOpts.raw {
+			return exportSelected(cmd, m)
+		}
+
+		// A complete portable snapshot must have every referenced object.
+		// Selective exports above only require (and authenticate) their chosen
+		// object, which is useful when recovering data from a partially broken
+		// snapshot.
 		if missing := missingObjects(st, m); len(missing) > 0 {
 			return fmt.Errorf("snapshot %s is broken: %d object file(s) missing — it cannot be exported (see `dockervc doctor`)",
 				m.ID, len(missing))
@@ -155,9 +181,13 @@ lands in an exports/ folder in the current directory (created on demand) as
 
 func init() {
 	f := exportCmd.Flags()
-	f.StringVarP(&exportOpts.out, "out", "o", "", "output archive path (default: ./<snapshot-id>.dvca)")
+	f.StringVarP(&exportOpts.out, "out", "o", "", "output path (default: organized under the export folder)")
 	f.BoolVar(&exportOpts.latest, "latest", false, "export the newest snapshot")
 	f.StringVar(&exportOpts.split, "split", "", "split the archive into parts (deferred)")
+	f.StringVar(&exportOpts.volume, "volume", "", "export one named volume instead of the whole snapshot")
+	f.StringVar(&exportOpts.image, "image", "", "export one image reference or digest instead of the whole snapshot")
+	f.StringVar(&exportOpts.path, "path", "", "export one file or directory from the selected volume")
+	f.BoolVar(&exportOpts.raw, "raw", false, "write one selected regular file without a tar wrapper")
 	f.BoolVarP(&forceYes, "yes", "y", false, "overwrite an existing output file")
 	rootCmd.AddCommand(exportCmd)
 }

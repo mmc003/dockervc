@@ -42,6 +42,18 @@ User-facing changes per version. Format loosely follows
   volume index and lists captured paths, sizes, types, modification times, and
   link targets. The interactive CLI includes a guided Archive flow.
 
+### Selective resource export
+
+- `dockervc export` can now write one captured volume, image, volume directory,
+  or raw regular file without restoring the snapshot or requiring Docker.
+- Default selective outputs are organized by snapshot and recorded in an
+  atomic `export-index.json`; `archive list` discovers them alongside `.dvca`
+  archives. `dockervc files` browses a local snapshot's captured volume index.
+- Selective exports stream from the CAS with exact progress and verify the
+  complete stored-object checksum before atomically publishing the output.
+- The full-screen Export flow provides a type-to-filter folder browser for
+  volume paths, with directory navigation and a manual-entry fallback.
+
 ## v0.6.0 — 2026-09-16
 
 ### Windows uninstaller

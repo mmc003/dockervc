@@ -63,7 +63,8 @@ var menuActions = []action{
 	{"prune", "", "reclaim storage from unreferenced objects", nil},
 	{"config", "[get|set|unset]", "view or change store settings", guidedConfig},
 	{"rollback", "<snap> [--all]", "restore engine state from a snapshot", guidedRollback},
-	{"export", "<snap> [-o <file>]", "package a snapshot into a portable .dvca archive", guidedExport},
+	{"export", "<snap> [resource flags]", "export a snapshot, volume, image, directory, or file", guidedExport},
+	{"files", "<snap> <volume> [prefix]", "browse files captured in a local volume", guidedFiles},
 	{"archive", "list|show|verify|files", "inspect exported .dvca archives", guidedArchive},
 	{"import", "<archive.dvca>", "add an archive's snapshot to this store", guidedImport},
 }
@@ -190,6 +191,10 @@ func resetCommandFlags() {
 		out    string
 		latest bool
 		split  string
+		volume string
+		image  string
+		path   string
+		raw    bool
 	}{}
 	importOpts = struct {
 		apply bool
@@ -306,16 +311,65 @@ func guidedRollback(r *bufio.Reader) []string {
 	return argv
 }
 
-// guidedExport picks a snapshot, then asks where to write the archive. The
-// suggested default matches the bare command: the export.folder setting,
-// else exports/<snapID>.dvca in the current directory.
+// guidedExport exposes both portable whole-snapshot archives and selective
+// standard tar/raw exports without requiring users to memorize flags.
 func guidedExport(r *bufio.Reader) []string {
 	id := pickSnapshot(r, "export which snapshot?", false)
 	if id == "" {
 		return nil
 	}
-	path := promptLine(r, "output path", defaultExportPath(id))
-	return []string{"export", id, "-o", path}
+	kind := strings.ToLower(promptLine(r, "what (snapshot/volume/image/path/raw)", "snapshot"))
+	argv := []string{"export", id}
+	switch kind {
+	case "snapshot", "all":
+	case "volume":
+		name := promptLine(r, "volume name", "")
+		if name == "" {
+			return nil
+		}
+		argv = append(argv, "--volume", name)
+	case "image":
+		name := promptLine(r, "image reference or digest", "")
+		if name == "" {
+			return nil
+		}
+		argv = append(argv, "--image", name)
+	case "path", "raw":
+		name := promptLine(r, "volume name", "")
+		path := promptLine(r, "path inside volume", "")
+		if name == "" || path == "" {
+			return nil
+		}
+		argv = append(argv, "--volume", name, "--path", path)
+		if kind == "raw" {
+			argv = append(argv, "--raw")
+		}
+	default:
+		fmt.Printf("unknown export type %q\n", kind)
+		return nil
+	}
+	out := promptLine(r, "output path (blank = organized default)", "")
+	if out != "" {
+		argv = append(argv, "-o", out)
+	}
+	return argv
+}
+
+func guidedFiles(r *bufio.Reader) []string {
+	id := pickSnapshot(r, "browse which snapshot?", false)
+	if id == "" {
+		return nil
+	}
+	volume := promptLine(r, "volume name", "")
+	if volume == "" {
+		return nil
+	}
+	prefix := promptLine(r, "optional file/directory prefix", "")
+	argv := []string{"files", id, volume}
+	if prefix != "" {
+		argv = append(argv, prefix)
+	}
+	return argv
 }
 
 // guidedArchive exposes the archive-inspection command group without making

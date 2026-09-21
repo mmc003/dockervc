@@ -138,6 +138,11 @@ Move a snapshot to another machine (or off-site path) as one portable file:
 ```sh
 dockervc export snap-...                  # writes exports/<snapshot-id>.dvca (folder created on demand)
 dockervc export --latest -o /path/state.dvca
+dockervc export latest --volume app_data # writes a standard volume tar
+dockervc export latest --image postgres:17  # writes a Docker-save tar
+dockervc export latest --volume app_data --path etc/nginx  # filtered tar
+dockervc export latest --volume app_data --path etc/app.conf --raw  # one plain file
+dockervc files latest app_data [prefix]   # browse a local snapshot's volume index
 dockervc config set export.folder ~/backups   # default folder for exports (menus and bare command)
 dockervc config unset export.folder           # back to exports/ in the current directory
 dockervc archive list                         # quickly list exports in the configured folder
@@ -153,8 +158,18 @@ verbatim, and a GNU `sha256sum`-style checksums file — after `tar xf` you can
 verify it with plain `shasum -a 256 -c checksums.sha256`, no dockervc needed.
 Import re-hashes every object while streaming it in; a tampered or truncated
 archive is rejected by name, and re-importing the same snapshot is a no-op.
-`archive list` and `archive show` read only the leading manifest, so browsing
-large exports is fast. `archive verify` performs the deliberately slower full
+Whole-snapshot exports remain importable `.dvca` archives. Selective exports
+are ordinary tar files (or one plain file with `--raw`) and are intended for
+recovery or use with tools such as `docker load`; they are not importable
+snapshot bundles. Without `-o`, selective artifacts are organized below
+`exports/<snapshot-id>/` and recorded in `export-index.json`; `archive list`
+shows those indexed artifacts alongside `.dvca` files. In the full-screen
+`dockervc cli`, file and directory export uses the captured volume index as a
+filterable folder browser: Enter opens directories, “export this folder”
+selects a subtree, and manual entry handles legacy indexes or empty folders.
+
+`archive list` and `archive show` read only metadata, so browsing large
+exports is fast. `archive verify` performs the deliberately slower full
 structure and checksum pass. `archive files` authenticates and reads the
 selected volume's stored file index; snapshots from before file indexing report
 that no index is available. All four actions are also available through the

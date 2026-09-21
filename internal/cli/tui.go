@@ -151,6 +151,7 @@ type dialog struct {
 
 	items    []listItem // dlgList rows
 	multi    bool       // dlgList: checkboxes (space toggles) vs single choice
+	filter   bool       // dlgList single-choice: typed text filters visible rows
 	checked  []bool     // dlgList checkbox state, parallel to items
 	listDone func(t *tui, vals []string, ok bool)
 
@@ -414,7 +415,8 @@ func (t *tui) dialogKey(r rune, k key) {
 			d.pickSel = 0
 		}
 	case dlgList:
-		n := len(d.items)
+		items := d.visibleListItems()
+		n := len(items)
 		switch k {
 		case keyEsc:
 			t.dlg = nil
@@ -444,9 +446,21 @@ func (t *tui) dialogKey(r rune, k key) {
 				if d.pickSel >= n {
 					d.pickSel = n - 1
 				}
-				d.listDone(t, []string{d.items[d.pickSel].value}, true)
+				d.listDone(t, []string{items[d.pickSel].value}, true)
+			}
+		case keyBackspace:
+			if d.filter {
+				if runes := []rune(d.value); len(runes) > 0 {
+					d.value = string(runes[:len(runes)-1])
+					d.pickSel = 0
+				}
 			}
 		case keyNone:
+			if d.filter {
+				d.value += string(r)
+				d.pickSel = 0
+				break
+			}
 			switch r {
 			case 'j':
 				if d.pickSel < n-1 {
@@ -537,14 +551,13 @@ func (t *tui) runMenuAction(i int) {
 			if !ok || id == "" {
 				return
 			}
-			// Default suggestion: the export.folder setting, else
-			// exports/<snapID>.dvca next to where dockervc was started.
-			t.askPath("output path", defaultExportPath(id), func(path string, ok bool) {
-				if !ok || path == "" {
-					return
-				}
-				t.execTUI("export", id, "-o", path)
-			})
+			t.askExportScope(id)
+		})
+	case "files":
+		t.askPick("browse which snapshot?", func(id string, ok bool) {
+			if ok && id != "" {
+				t.askLocalVolumeFiles(id)
+			}
 		})
 	case "archive":
 		t.askArchiveAction()
@@ -635,6 +648,34 @@ func (t *tui) askListOne(title string, items []listItem, done func(val string, o
 				done("", false)
 			}
 		}}
+}
+
+// askFilterListOne is askListOne with snapshot-picker-style type-to-filter
+// behavior. Arrow keys move through the filtered rows; Enter selects one.
+func (t *tui) askFilterListOne(title string, items []listItem, done func(val string, ok bool)) {
+	t.dlg = &dialog{kind: dlgList, title: title, items: items, filter: true,
+		listDone: func(t *tui, vals []string, ok bool) {
+			if ok && len(vals) > 0 {
+				done(vals[0], true)
+			} else {
+				done("", false)
+			}
+		}}
+}
+
+func (d *dialog) visibleListItems() []listItem {
+	if !d.filter || d.value == "" {
+		return d.items
+	}
+	needle := strings.ToLower(d.value)
+	items := make([]listItem, 0, len(d.items))
+	for _, item := range d.items {
+		haystack := strings.ToLower(item.text + "\n" + item.note)
+		if strings.Contains(haystack, needle) {
+			items = append(items, item)
+		}
+	}
+	return items
 }
 
 // askListMany shows a checklist dialog. Boxes start checked only for rows
@@ -808,7 +849,7 @@ func outputHadProblems(lines []string) bool {
 // snapArgSlots maps commands to the positional-argument indexes that hold
 // snapshot ids (used for hints, completion and expansion).
 var snapArgSlots = map[string][]int{
-	"show": {0}, "diff": {0, 1}, "delete": {0}, "rollback": {0}, "export": {0},
+	"show": {0}, "diff": {0, 1}, "delete": {0}, "rollback": {0}, "export": {0}, "files": {0},
 }
 
 // refresh reloads the snapshot list and cached store header line.
@@ -1202,13 +1243,18 @@ func (t *tui) dialogView() [][2]any {
 			out = append(out, [2]any{s, i == d.pickSel})
 		}
 	case dlgList:
+		items := d.visibleListItems()
 		out = append(out, [2]any{" " + d.title, false})
-		if len(d.items) == 0 {
-			out = append(out, [2]any{"   (nothing to list)", false})
+		if len(items) == 0 {
+			message := "   (nothing to list)"
+			if d.filter {
+				message = "   (no rows match — type less, or Esc to cancel)"
+			}
+			out = append(out, [2]any{message, false})
 		}
 		// align the status notes within the rows
 		w := 0
-		for _, it := range d.items {
+		for _, it := range items {
 			if len(it.text) > w {
 				w = len(it.text)
 			}
@@ -1216,7 +1262,7 @@ func (t *tui) dialogView() [][2]any {
 		if w > t.w-24 {
 			w = t.w - 24
 		}
-		for i, it := range d.items {
+		for i, it := range items {
 			if len(out) >= t.mainH()-1 {
 				out = append(out, [2]any{"   …", false})
 				break
@@ -1278,6 +1324,8 @@ func (t *tui) hintBar() string {
 		return " ↑↓ select · type to filter · Tab/Enter confirm · Esc cancel"
 	case t.dlg != nil && t.dlg.kind == dlgList && t.dlg.multi:
 		return " ↑↓/j/k move · space/x toggle · a all/none · Enter confirm · Esc cancel"
+	case t.dlg != nil && t.dlg.kind == dlgList && t.dlg.filter:
+		return " ↑↓ select · type to filter · Enter confirm · Esc cancel"
 	case t.dlg != nil && t.dlg.kind == dlgList:
 		return " ↑↓/j/k select · Enter confirm · Esc cancel"
 	case t.dlg != nil && t.dlg.kind == dlgBool:
@@ -1315,6 +1363,9 @@ func (t *tui) inputLine() string {
 					}
 				}
 				return fmt.Sprintf(" %d of %d selected — Enter confirms", n, len(d.items))
+			}
+			if d.filter {
+				return fmt.Sprintf(" filter: %s", d.value)
 			}
 			return " Enter picks the highlighted row"
 		default:
