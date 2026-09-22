@@ -52,10 +52,11 @@ type Capturer struct {
 	Opt      Options
 	Progress progress.Reporter
 
-	manifest *model.Manifest
-	warnings []string
-	meter    *progress.Meter
-	baseline *model.Manifest
+	manifest       *model.Manifest
+	warnings       []string
+	meter          *progress.Meter
+	baseline       *model.Manifest
+	requiredImages map[string]bool
 }
 
 // Run captures the engine state and persists the snapshot. On failure the
@@ -124,8 +125,8 @@ func (c *Capturer) Run(ctx context.Context) (result *model.Manifest, retErr erro
 			return nil, fmt.Errorf("capture bind mounts: %w", err)
 		}
 	}
-	if c.Opt.scope("images") {
-		if err := c.captureImages(ctx); err != nil {
+	if c.Opt.scope("images") || len(c.requiredImages) > 0 {
+		if err := c.captureImages(ctx, c.Opt.scope("images")); err != nil {
 			return nil, fmt.Errorf("capture images: %w", err)
 		}
 	}
@@ -198,89 +199,34 @@ func (c *Capturer) captureContainers(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("marshal inspect for %s: %w", name, err)
 		}
-
-		// Commit the container filesystem (its writable layer) to an image,
-		// save that image, then drop the intermediate image.
-		commitRef := fmt.Sprintf("dockervc/snap/%s/%s", c.manifest.ID, sanitize(name))
-		commitID, err := c.Cli.CommitContainer(ctx, ct.ID, commitRef)
+		configHash, err := dockerapi.ContainerConfigHash(raw)
 		if err != nil {
-			return fmt.Errorf("commit container %s: %w", name, err)
+			return fmt.Errorf("normalize container %s configuration: %w", name, err)
 		}
-		stream, err := c.Cli.SaveImage(ctx, commitID)
-		if err != nil {
-			c.Cli.RemoveImage(ctx, commitID)
-			return fmt.Errorf("save committed image for %s: %w", name, err)
+		if inspect.Image == "" {
+			return fmt.Errorf("container %s has no immutable image ID", name)
 		}
-		// Spill the save stream so the layer content can be hashed after the
-		// blob is stored; the bytes PutBlob sees are unchanged.
-		var layerHash string
-		indexer, idxErr := NewContainerFSIndexer(stream)
-		if idxErr != nil {
-			c.warn("container %s: layer hashing unavailable (%v)", name, idxErr)
-			indexer = nil
+		imageRef := ""
+		if inspect.Config != nil {
+			imageRef = inspect.Config.Image
 		}
-		src := io.Reader(stream)
-		if indexer != nil {
-			src = indexer.Reader()
+		if c.requiredImages == nil {
+			c.requiredImages = map[string]bool{}
 		}
-		obj, err := c.putBlobTracked("image", "", src)
-		stream.Close()
-		if indexer != nil {
-			if h, ferr := indexer.Finish(); ferr != nil {
-				c.warn("container %s: layer hash failed (%v)", name, ferr)
-			} else {
-				layerHash = h
-			}
-		}
-		rmErr := c.Cli.RemoveImage(ctx, commitID)
-		if rmErr != nil {
-			c.warn("intermediate image %s left behind (remove failed: %v)", short(commitID), rmErr)
-		}
-		if err != nil {
-			return fmt.Errorf("store committed image for %s: %w", name, err)
-		}
-
-		// Every commit re-tars the filesystem (new config timestamps), so the
-		// object hash differs even for identical content. Keying by layer
-		// hash lets an unchanged container reuse an earlier snapshot's
-		// object instead of storing a duplicate. Safe to share: the image is
-		// only the filesystem source — container config lives in
-		// InspectJSON, restored independently.
-		reused := false
-		if layerHash != "" {
-			key := "containerfs:" + layerHash
-			if prev, ok, kerr := c.St.ObjectByImageKey(key); kerr != nil {
-				c.warn("container %s: dedup lookup failed (%v)", name, kerr)
-			} else if ok && prev.Hash != obj.Hash {
-				if derr := c.St.DeleteObject(obj.Hash); derr != nil {
-					c.warn("container %s: duplicate object not reclaimed (%v)", name, derr)
-				} else {
-					obj = store.ObjectInfoResult{Hash: prev.Hash, Size: prev.Size, New: false}
-					reused = true
-				}
-			} else if !ok {
-				if kerr := c.St.SetImageKey(obj.Hash, key); kerr != nil {
-					c.warn("container %s: dedup key not recorded (%v)", name, kerr)
-				}
-			}
-		}
-		c.accountObject(obj)
+		c.requiredImages[inspect.Image] = true
 
 		c.manifest.Containers = append(c.manifest.Containers, model.ContainerRecord{
 			Name:        name,
 			ID:          ct.ID,
 			InspectJSON: raw,
-			ImageObject: obj.Hash,
-			LayerHash:   layerHash,
+			ImageRef:    imageRef,
+			ImageID:     inspect.Image,
+			ImageKey:    inspect.Image,
+			ConfigHash:  configHash,
 			Running:     running,
-			Size:        obj.Size,
 		})
-		note := ""
-		if reused {
-			note = "  (filesystem unchanged, reused)"
-		}
-		fmt.Printf("  container %-30s %s%s\n", name, HumanBytes(obj.Size), note)
-		c.finishProgressEntity(name, i+1, len(list), obj.Size)
+		fmt.Printf("  container %-30s recipe (image %s)\n", name, short(inspect.Image))
+		c.finishProgressEntity(name, i+1, len(list), 0)
 	}
 	return nil
 }
@@ -396,54 +342,88 @@ func (c *Capturer) captureBindMounts(ctx context.Context) error {
 	return nil
 }
 
-func (c *Capturer) captureImages(ctx context.Context) error {
+func (c *Capturer) captureImages(ctx context.Context, all bool) error {
 	imgs, err := c.Cli.ListImages(ctx)
 	if err != nil {
 		return err
 	}
-	for i, img := range imgs {
+	selected := imgs[:0]
+	for _, img := range imgs {
+		if all || c.requiredImages[img.ID] {
+			selected = append(selected, img)
+		}
+	}
+	for id := range c.requiredImages {
+		found := false
+		for _, img := range selected {
+			if img.ID == id {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("required container image %s is not present", id)
+		}
+	}
+	for i, img := range selected {
 		// Dedup key: repo digest if pushed/pulled, else local image ID.
 		key := img.ID
 		for _, d := range img.RepoDigests {
 			key = d
 			break
 		}
-		c.progressEntity("snapshotting image", key, c.estimateSize("image", key), i, len(imgs))
-		if existing, ok, err := c.St.ObjectByImageKey(key); err != nil {
+		storageKey := "image-neutral-v1:" + key
+		c.progressEntity("snapshotting image", key, c.estimateSize("image", key), i, len(selected))
+		if existing, ok, err := c.St.ObjectByImageKey(storageKey); err != nil {
 			return err
 		} else if ok {
 			// Dedup: the exact image content is already stored; the ref is
 			// wired up by InsertSnapshot from the manifest below.
 			c.manifest.Images = append(c.manifest.Images, model.ImageRecord{
-				Refs: img.RepoTags, Digest: key, Object: existing.Hash, Size: existing.Size,
+				ID: img.ID, Refs: cleanImageRefs(img.RepoTags), Digests: img.RepoDigests,
+				Key: img.ID, Digest: key, Object: existing.Hash, Size: existing.Size,
 			})
 			c.manifest.Stats.ReusedObjects++
-			c.finishProgressEntity(key+" (reused)", i+1, len(imgs), 0)
+			c.finishProgressEntity(key+" (reused)", i+1, len(selected), 0)
 			continue
 		}
 
+		// Use the immutable ID rather than a mutable public tag. New container
+		// recipes preserve RepoTags only as provenance.
 		ref := img.ID
-		if len(img.RepoTags) > 0 {
-			ref = img.RepoTags[0]
-		}
 		stream, err := c.Cli.SaveImage(ctx, ref)
 		if err != nil {
+			if c.requiredImages[img.ID] {
+				return fmt.Errorf("save required container image %s: %w", ref, err)
+			}
 			c.warn("image %s not captured: %v", ref, err)
 			continue
 		}
-		obj, err := c.putBlobTracked("image", key, stream)
-		stream.Close()
+		neutral := dockerapi.TagNeutralImageArchive(stream)
+		obj, err := c.putBlobTracked("image", storageKey, neutral)
+		neutral.Close()
 		if err != nil {
 			return fmt.Errorf("store image %s: %w", ref, err)
 		}
 		c.accountObject(obj)
 		c.manifest.Images = append(c.manifest.Images, model.ImageRecord{
-			Refs: img.RepoTags, Digest: key, Object: obj.Hash, Size: obj.Size,
+			ID: img.ID, Refs: cleanImageRefs(img.RepoTags), Digests: img.RepoDigests,
+			Key: img.ID, Digest: key, Object: obj.Hash, Size: obj.Size,
 		})
 		fmt.Printf("  image     %-30s %s\n", ref, HumanBytes(obj.Size))
-		c.finishProgressEntity(key, i+1, len(imgs), obj.Size)
+		c.finishProgressEntity(key, i+1, len(selected), obj.Size)
 	}
 	return nil
+}
+
+func cleanImageRefs(refs []string) []string {
+	out := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		if ref != "" && ref != "<none>:<none>" {
+			out = append(out, ref)
+		}
+	}
+	return out
 }
 
 func (c *Capturer) captureNetworks(ctx context.Context) error {

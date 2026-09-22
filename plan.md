@@ -1,6 +1,6 @@
 # Implementation Plan and Recovery Checkpoint — Progress/ETA and TUI
 
-Last updated: 2026-09-21
+Last updated: 2026-09-22
 
 This file records the completed v0.7.0 deep-status/progress work and the
 remaining follow-ups. It is intentionally detailed enough to resume after an
@@ -712,8 +712,9 @@ Tests required before stabilizing the format:
 
 ## Planned feature: dependency-aware container reconciliation
 
-Status: desired behavior agreed in principle on 2026-09-21; implementation is
-deferred. Review unresolved details again before writing code.
+Status: implementation underway. Reconciliation Stage 1 is committed in
+`9223a5e`; the core reference-only recipe work described below was implemented
+locally on 2026-09-22 and is undergoing full integration verification.
 
 ### Goal
 
@@ -738,7 +739,7 @@ required to restore it.
 
 ### Implementation checkpoint: reconciliation stage 1
 
-Implemented locally on 2026-09-21; not yet committed as a standalone change:
+Implemented on 2026-09-21 and committed as `9223a5e`:
 
 - Live rollback inventory now inspects every container once and records its
   normalized creation-configuration hash, immutable image ID, configured
@@ -767,12 +768,46 @@ Implemented locally on 2026-09-21; not yet committed as a standalone change:
 - Focused reconciliation, shared-volume, configuration-hash, rollback,
   Docker mapping, and CLI tests pass; `go vet ./...` and `go test ./...` pass.
 
-Stage 1 intentionally keeps the existing snapshot compatibility path in
+Stage 1 intentionally kept the existing snapshot compatibility path in
 which each container may reference a committed filesystem image object.
 Remaining work begins with the new reference-only container recipe: make a
 container depend on the captured original image entity instead of requiring a
 per-container committed filesystem, then make image loading/tag conflicts
 safe before changing the snapshot format.
+
+### Implementation checkpoint: reconciliation Stage 2 core
+
+Implemented locally on 2026-09-22:
+
+- `ContainerRecord` now has backward-compatible `ImageRef`, `ImageID`,
+  `ImageKey`, and `ConfigHash` recipe fields. `ImageObject` and `LayerHash`
+  remain available for legacy manifests.
+- `ImageRecord` now distinguishes immutable local ID, registry digests,
+  mutable provenance refs, canonical dependency key, and stored object.
+- New snapshots no longer run `docker commit` per container. They inventory
+  container recipes and capture each required base image once at snapshot
+  scope. `snapshot --only containers` automatically includes those images.
+- Image capture saves by immutable ID and streams the docker-save archive
+  through tag neutralization. `RepoTags` and legacy `repositories` metadata
+  are removed so `docker load` cannot move a public tag. A versioned dedup key
+  prevents reuse of older tag-bearing image objects.
+- Restore planning now supports both formats: new recipes resolve an exact
+  existing image ID or load one shared image object under a dockervc-owned
+  internal tag; legacy recipes continue using their committed filesystem.
+- Multiple containers referencing the same image produce one load step and
+  share the resolved image reference.
+- Added `rollback --reuse-existing-by-name`. This opt-in mode performs no deep
+  dependency comparisons and never restores, loads, or replaces dependencies.
+  It verifies that every required image tag/ID, volume name, and network name
+  exists, then creates only missing selected containers. Any missing named
+  dependency aborts planning.
+- Added manifest compatibility, tag-neutral archive, shared-image planning,
+  exact-image reuse, and reuse-by-name tests.
+
+Still pending before Stage 2 is complete: richer per-entity dry-run/status
+output and storage accounting, broader portable/doctor/prune compatibility
+fixtures, Docker integration tests, manual OpenClaw validation, and release
+documentation.
 
 ### Next implementation stage: reference-only container recipes
 
@@ -1172,6 +1207,168 @@ and failure output must identify completed, partial, and untouched entities.
     configuration requires it.
 11. Restore desired running states and wait for health checks where available.
 12. Report reused, created, restored, recreated, partial, and failed entities.
+
+### Rollback performance optimization roadmap
+
+Ranking balances expected wall-clock improvement, safety/correctness impact,
+how commonly the work is encountered, and implementation effort. Rank 1 is
+the first item to implement. "Effort" includes design, compatibility tests,
+failure cleanup, and Docker integration verification—not only code size.
+
+The current exact rollback path can read a changed volume three times:
+
+```text
+deep comparison -> pre-rollback safety snapshot -> snapshot restore
+```
+
+It also creates a full-engine safety snapshot even when the plan changes only
+one container or volume. Docker Desktop adds daemon and filesystem-boundary
+latency, particularly for volumes containing many small files. Exact equality
+currently requires a complete tar stream and SHA-256 hash of every regular
+file, and required volumes are scanned sequentially.
+
+| Rank | Optimization | Importance | Effort | Reason for rank |
+|---:|---|---|---|---|
+| 1 | Scope the safety checkpoint to the mutation graph | Critical | Medium | Removes unrelated image/volume/container capture from nearly every applied partial rollback while preserving recovery for everything the plan can change. |
+| 2 | Reuse the deep-scan stream as staged checkpoint data | Critical | High | Eliminates the second complete read of every changed volume; this is the largest remaining I/O reduction after checkpoint scoping. |
+| 3 | Move final confirmation before checkpoint capture | High | Low | Prevents an expensive checkpoint when the user declines the plan and fixes the current surprising confirmation order. Low-risk, quick improvement. |
+| 4 | Add bounded parallel volume comparison | High | Medium | Independent volumes can scan concurrently; a limit of two should improve throughput without overwhelming Docker Desktop or the underlying disk. |
+| 5 | Show live TUI phase, volume, bytes, rate, and ETA | High | Medium | Does not reduce I/O, but makes long correct scans distinguishable from hangs and exposes which phase needs optimization. Reuse the existing progress reporter/tracker rather than creating a second calculation path. |
+| 6 | Optimize clear-and-extract restoration | Medium-High | Medium-High | `find /dst -mindepth 1 -delete` is costly for many small files. Benchmark safe alternatives and the extraction transport before changing destructive code. |
+| 7 | Add Docker responsiveness preflight and timing diagnostics | Medium | Low | Separates dockervc cost from slow Docker API/desktop behavior and records per-phase timings for evidence-driven work. |
+| 8 | Offer an explicit metadata-first fast comparison mode | Medium | High | Can avoid hashing unchanged-looking files, but size/mtime/mode are not proof of content equality. It must be opt-in, clearly weaker, and never replace the exact default. |
+
+#### Rank 1: mutation-scoped safety checkpoint
+
+- Derive checkpoint scope from the final plan, not directly from the user's
+  original selection.
+- Include every entity that can be mutated: removed/recreated containers,
+  restored volumes, changed images/networks when supported, and all live
+  containers affected by shared-volume coordination.
+- Do not capture unrelated engine images, volumes, networks, or containers.
+- Preserve enough dependency metadata to reverse a partial failure.
+- Dry-run must state exactly what the safety checkpoint would contain.
+- Tests must cover shared volumes and out-of-scope attached containers so
+  scoping cannot omit data that rollback will change.
+
+#### Rank 2: staged scan/checkpoint stream reuse
+
+- During exact live-volume comparison, tee the same tar stream into a staged
+  CAS object while building its file index.
+- If the volume is unchanged, discard/unreference the staged result.
+- If the volume will be restored, promote the staged object and index into
+  the safety checkpoint instead of reading the live volume again.
+- Do not publish a snapshot record until the complete mutation graph is
+  staged and validated.
+- Cancellation or failure must leave only pruneable unreferenced CAS objects,
+  never a plausible partial safety snapshot.
+- Preserve current content hashes and deterministic indexes so this does not
+  create a second comparison format.
+
+#### Rank 3: confirm before expensive checkpoint work
+
+The intended order is:
+
+```text
+compare -> print exact plan/warnings -> confirm -> safety checkpoint -> apply
+```
+
+The checkpoint remains mandatory by default after confirmation. If checkpoint
+creation fails, abort before the first mutation. This change improves aborted
+rollback time but does not weaken recovery guarantees for an applied rollback.
+
+#### Rank 4: bounded concurrent comparison
+
+- Scan only independent required volumes concurrently.
+- Default concurrency should start at two and be configurable only after
+  Docker Desktop, native Linux, and slow-disk measurements justify it.
+- Keep output deterministic by collecting results and ordering them by the
+  manifest, regardless of completion order.
+- Use one cancellable group: cancellation or a fatal context error stops all
+  helpers and waits for cleanup.
+- Progress must aggregate total bytes while still naming each active volume.
+- Do not concurrently mutate volumes; parallelism applies to read-only
+  comparison only.
+
+#### Rank 5: visible progress and phase timings
+
+Integrate this work with the existing TUI live-progress stage. At minimum show:
+
+```text
+comparing volume openclaw_dev_home  1.2 GiB / ~2.0 GiB  82 MiB/s  ~ETA 00:10
+creating scoped safety checkpoint   volume 1 / 1
+restoring openclaw_dev_home         640 MiB / 2.0 GiB
+```
+
+Record elapsed time for inventory, comparison per volume, checkpoint capture,
+volume clearing, extraction, image load, and container recreation. These
+timings should be available in redirected/non-TUI output without ANSI codes.
+
+#### Rank 6: restore-path benchmarking and optimization
+
+- Benchmark deletion and extraction separately with large files and many
+  small files on Docker Desktop and native Linux.
+- Compare the existing `find -delete` path with carefully bounded alternatives
+  that cannot delete the mount point or escape it.
+- Compare Docker `CopyToContainer` with a helper that receives and extracts a
+  tar stream directly.
+- Preserve exact clear-then-extract semantics and current archive traversal
+  protections.
+- Do not trade same-name volume preservation for delete/recreate speed.
+- Failure output must continue identifying a potentially partial volume and
+  the safety checkpoint needed to recover it.
+
+#### Rank 7: Docker latency diagnostics
+
+- Time Docker inventory, helper creation/start, archive first-byte, archive
+  completion, clear completion, and extraction completion.
+- Warn when Docker API setup or first-byte latency dominates actual transfer.
+- Report the active helper name and target volume so a user can inspect it.
+- Add a read-only diagnostic command or verbose mode; do not make ordinary
+  rollback depend on expensive calls such as full `docker system df -v`.
+
+#### Rank 8: optional fast comparison
+
+- Add only as an explicit policy such as `--compare=metadata`; retain exact
+  content hashing as the default.
+- Compare normalized path, type, size, mtime, mode, and link target first.
+- Clearly report that metadata equality is probabilistic, not proof that file
+  bytes match; preserved timestamps can hide content changes.
+- Never use metadata-only comparison automatically for databases, legacy
+  snapshots, unverifiable indexes, or safety-checkpoint decisions.
+- A possible later hybrid may hash only metadata-changed files, but it needs a
+  persistent trusted live baseline or change journal before it can claim exact
+  equality.
+
+#### Existing user-controlled shortcuts
+
+- `--reuse-existing-by-name` is the fastest path when the user wants only to
+  create missing containers and explicitly trusts existing named images,
+  volumes, and networks. It skips deep comparison and never replaces those
+  dependencies.
+- `--keep-current` skips the safety checkpoint and can substantially reduce
+  applied rollback time, but removes dockervc's automatic recovery point. Keep
+  it an explicit expert option and warn users to use it only when an adequate
+  current-state backup already exists.
+- Neither shortcut changes the safe default exact-restore behavior.
+
+#### Performance verification matrix
+
+Measure before and after every optimization using the same fixtures:
+
+- one unchanged large-file volume;
+- one changed large-file volume;
+- one unchanged many-small-files volume;
+- one changed many-small-files volume;
+- two independent volumes for concurrency tests;
+- one shared volume with selected and out-of-scope attached containers;
+- Docker Desktop and native Linux where available.
+
+Record inventory time, time to first archive byte, scan throughput, checkpoint
+bytes/time, clear time, extraction throughput, total rollback time, helper
+cleanup, peak memory, and whether the plan/result is byte-for-byte equivalent.
+No performance change is complete until cancellation, failure recovery,
+legacy snapshots, and shared-volume safety tests still pass.
 
 ### Consistency, safety, and output requirements
 

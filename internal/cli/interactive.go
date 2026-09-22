@@ -186,6 +186,7 @@ func resetCommandFlags() {
 		networks    []string
 		dryRun      bool
 		keepCurrent bool
+		reuseByName bool
 	}{}
 	exportOpts = struct {
 		out    string

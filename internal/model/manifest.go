@@ -13,28 +13,33 @@ import (
 
 // Manifest describes everything captured by one snapshot.
 type Manifest struct {
-	ID            string           `json:"id"`
-	CreatedAt     time.Time        `json:"created_at"`
-	Message       string           `json:"message"`
-	DockerVersion string           `json:"docker_version"`
-	EngineID      string           `json:"engine_id"`
-	Consistent    bool             `json:"consistent"` // taken with --stop (app-consistent)
+	ID            string            `json:"id"`
+	CreatedAt     time.Time         `json:"created_at"`
+	Message       string            `json:"message"`
+	DockerVersion string            `json:"docker_version"`
+	EngineID      string            `json:"engine_id"`
+	Consistent    bool              `json:"consistent"` // taken with --stop (app-consistent)
 	Containers    []ContainerRecord `json:"containers"`
 	Images        []ImageRecord     `json:"images"`
 	Volumes       []VolumeRecord    `json:"volumes"`
 	Networks      []NetworkRecord   `json:"networks"`
 	BindMounts    []BindMountRecord `json:"bind_mounts,omitempty"`
-	TotalSize     int64            `json:"total_size"` // sum of object sizes (compressed)
+	TotalSize     int64             `json:"total_size"` // sum of object sizes (compressed)
 	Stats         SnapshotStats     `json:"stats"`
 }
 
-// ContainerRecord is one container: its full inspect JSON plus the object
-// holding its committed filesystem.
+// ContainerRecord is one container recreation recipe. New snapshots refer to
+// a snapshot-level ImageRecord through ImageKey; ImageObject and LayerHash are
+// retained for restoring legacy commit-based snapshots.
 type ContainerRecord struct {
 	Name        string          `json:"name"`
 	ID          string          `json:"id"`
 	InspectJSON json.RawMessage `json:"inspect_json"`
-	ImageObject string          `json:"image_object"` // CAS hash of docker-commit'ed image tar
+	ImageRef    string          `json:"image_ref,omitempty"`    // original Config.Image
+	ImageID     string          `json:"image_id,omitempty"`     // immutable image ID used by the container
+	ImageKey    string          `json:"image_key,omitempty"`    // link to a snapshot-level ImageRecord
+	ConfigHash  string          `json:"config_hash,omitempty"`  // normalized creation-time configuration
+	ImageObject string          `json:"image_object,omitempty"` // legacy CAS hash of docker-commit'ed image tar
 	// LayerHash fingerprints the filesystem CONTENT inside that tar (layer
 	// tars only, not the commit config, which is regenerated — and re-hashed —
 	// on every commit). It is metadata, not a CAS object: identical LayerHash
@@ -46,10 +51,13 @@ type ContainerRecord struct {
 
 // ImageRecord is one image present in the engine.
 type ImageRecord struct {
-	Refs   []string `json:"refs"` // repo tags (may be empty for dangling)
-	Digest string    `json:"digest"`
-	Object string    `json:"object"` // CAS hash of docker-save tar
-	Size   int64     `json:"size"`
+	ID      string   `json:"id,omitempty"`      // immutable local image ID
+	Refs    []string `json:"refs"`              // mutable repo tags; provenance only for new records
+	Digests []string `json:"digests,omitempty"` // immutable registry digests
+	Key     string   `json:"key,omitempty"`     // canonical container dependency lookup key
+	Digest  string   `json:"digest"`            // legacy selector/dedup identity
+	Object  string   `json:"object"`            // docker-save object
+	Size    int64    `json:"size"`
 }
 
 // VolumeRecord is one named volume.
@@ -78,9 +86,9 @@ type BindMountRecord struct {
 
 // SnapshotStats summarizes storage efficiency for this snapshot.
 type SnapshotStats struct {
-	NewObjects  int   `json:"new_objects"`  // objects written this run
-	ReusedObjects int `json:"reused_objects"` // objects already present (deduped)
-	NewBytes    int64 `json:"new_bytes"`    // bytes written this run
+	NewObjects    int   `json:"new_objects"`    // objects written this run
+	ReusedObjects int   `json:"reused_objects"` // objects already present (deduped)
+	NewBytes      int64 `json:"new_bytes"`      // bytes written this run
 }
 
 // ObjectInfo describes one stored object.

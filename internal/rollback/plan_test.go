@@ -387,6 +387,108 @@ func TestBuildPlanChangedSharedVolumeStopsAndRestartsUsers(t *testing.T) {
 	}
 }
 
+func TestBuildPlanReferenceRecipesShareOneImageLoad(t *testing.T) {
+	m := fixtureManifest()
+	m.Images = []model.ImageRecord{{
+		ID: "sha256:shared", Key: "sha256:shared", Digest: "sha256:shared",
+		Refs: []string{"example/app:latest"}, Object: "objshared",
+	}}
+	for i := range m.Containers {
+		m.Containers[i].ImageObject = ""
+		m.Containers[i].ImageID = "sha256:shared"
+		m.Containers[i].ImageKey = "sha256:shared"
+		m.Containers[i].ImageRef = "example/app:latest"
+	}
+
+	steps, warnings := BuildPlan(m, liveEmpty(), Scope{Containers: []string{"demo-web", "demo-worker"}})
+	if len(warnings) != 0 {
+		t.Fatalf("warnings: %v", warnings)
+	}
+	internal := ImageRestoreTag(m.ID, "sha256:shared")
+	load := findStep(steps, StepLoadImage, internal)
+	if load == nil || load.ObjectHash != "objshared" || len(load.Refs) != 1 || load.Refs[0] != internal {
+		t.Fatalf("shared image load = %+v", load)
+	}
+	loads := 0
+	for _, step := range steps {
+		if step.Kind == StepLoadImage && !step.Skip {
+			loads++
+		}
+		if step.Kind == StepCreateContainer && step.ImageRef != internal {
+			t.Fatalf("container %s image ref = %q, want %q", step.Name, step.ImageRef, internal)
+		}
+	}
+	if loads != 1 {
+		t.Fatalf("image load count = %d, want 1\n%s", loads, stepList(steps))
+	}
+}
+
+func TestBuildPlanReferenceRecipeReusesExactImageID(t *testing.T) {
+	m := fixtureManifest()
+	m.Containers = m.Containers[:1]
+	m.Containers[0].ImageObject = ""
+	m.Containers[0].ImageID = "sha256:exact"
+	m.Containers[0].ImageKey = "sha256:exact"
+	m.Containers[0].ImageRef = "public/app:latest"
+	m.Images = []model.ImageRecord{{
+		ID: "sha256:exact", Key: "sha256:exact", Digest: "sha256:exact", Object: "objexact",
+	}}
+	ls := liveEmpty()
+	ls.ImageDigests["sha256:exact"] = true
+
+	steps, _ := BuildPlan(m, ls, Scope{Containers: []string{"demo-web"}})
+	create := findStep(steps, StepCreateContainer, "demo-web")
+	if create == nil || create.ImageRef != "sha256:exact" {
+		t.Fatalf("create step = %+v, want exact image ID", create)
+	}
+	for _, step := range steps {
+		if step.Kind == StepLoadImage && !step.Skip {
+			t.Fatalf("exact image should not be loaded: %+v", step)
+		}
+	}
+}
+
+func TestReuseExistingByNameCreatesOnlyContainer(t *testing.T) {
+	m := fixtureManifest()
+	rec := &m.Containers[1]
+	rec.ImageRef = "busybox:latest"
+	rec.ImageID = "sha256:workerbase"
+	ls := liveEmpty()
+	ls.ImageTags["busybox:latest"] = true
+	ls.VolumeNames["demo-data"] = true
+	ls.NetworkNames["demo-net"] = true
+	scope := Scope{Containers: []string{"demo-worker"}, ReuseExistingByName: true}
+
+	if err := ValidateReuseExistingByName(m, ls, scope); err != nil {
+		t.Fatal(err)
+	}
+	steps, warnings := BuildPlan(m, ls, scope)
+	if len(warnings) != 0 || len(steps) != 2 {
+		t.Fatalf("steps=%v warnings=%v", steps, warnings)
+	}
+	if steps[0].Kind != StepCreateContainer || steps[0].ImageRef != "busybox:latest" ||
+		steps[1].Kind != StepStartContainer {
+		t.Fatalf("unexpected trust-by-name plan: %+v", steps)
+	}
+	for _, step := range steps {
+		if step.Kind == StepLoadImage || step.Kind == StepRestoreVolume || step.Kind == StepCreateNetwork {
+			t.Fatalf("trust-by-name plan mutates a dependency: %+v", step)
+		}
+	}
+}
+
+func TestReuseExistingByNameRejectsMissingDependency(t *testing.T) {
+	m := fixtureManifest()
+	rec := &m.Containers[1]
+	rec.ImageRef = "busybox:latest"
+	ls := liveEmpty()
+	ls.ImageTags["busybox:latest"] = true
+	err := ValidateReuseExistingByName(m, ls, Scope{Containers: []string{"demo-worker"}})
+	if err == nil || !strings.Contains(err.Error(), "volume demo-data") || !strings.Contains(err.Error(), "network demo-net") {
+		t.Fatalf("missing dependency error = %v", err)
+	}
+}
+
 func hasStr(list []string, sub string) bool {
 	for _, s := range list {
 		if strings.Contains(s, sub) {

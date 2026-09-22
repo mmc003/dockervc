@@ -24,6 +24,7 @@ var rollbackOpts struct {
 	networks    []string
 	dryRun      bool
 	keepCurrent bool
+	reuseByName bool
 }
 
 var rollbackCmd = &cobra.Command{
@@ -67,14 +68,27 @@ be rolled back.`,
 		if err != nil {
 			return err
 		}
+		if rollbackOpts.reuseByName {
+			if (!scope.All && len(scope.Containers) == 0) ||
+				len(rollbackOpts.volumes)+len(rollbackOpts.images)+len(rollbackOpts.networks) > 0 {
+				return fmt.Errorf("--reuse-existing-by-name applies only to selected containers; use --containers or --all")
+			}
+		}
 
 		live, err := rollback.FetchLiveState(ctx, dcli)
 		if err != nil {
 			return fmt.Errorf("inspect live engine: %w", err)
 		}
-		if err := rollback.ReconcileVolumes(ctx, dcli.VolumeTarStream, st.OpenObject, m, scope, live,
-			commandProgress(cmd.ErrOrStderr())); err != nil {
-			return fmt.Errorf("compare required volumes: %w", err)
+		if rollbackOpts.reuseByName {
+			scope.ReuseExistingByName = true
+			if err := rollback.ValidateReuseExistingByName(m, live, scope); err != nil {
+				return err
+			}
+		} else {
+			if err := rollback.ReconcileVolumes(ctx, dcli.VolumeTarStream, st.OpenObject, m, scope, live,
+				commandProgress(cmd.ErrOrStderr())); err != nil {
+				return fmt.Errorf("compare required volumes: %w", err)
+			}
 		}
 
 		steps, warnings := rollback.BuildPlan(m, live, scope)
@@ -207,6 +221,8 @@ func init() {
 	f.StringSliceVar(&rollbackOpts.networks, "networks", nil, "comma-separated network names to restore")
 	f.BoolVar(&rollbackOpts.dryRun, "dry-run", false, "print the restore plan and exit without changing anything")
 	f.BoolVar(&rollbackOpts.keepCurrent, "keep-current", false, "skip the pre-rollback checkpoint snapshot")
+	f.BoolVar(&rollbackOpts.reuseByName, "reuse-existing-by-name", false,
+		"create missing containers using existing named dependencies without comparing or replacing them")
 	f.BoolVarP(&forceYes, "yes", "y", false, "skip confirmation")
 	rootCmd.AddCommand(rollbackCmd)
 }

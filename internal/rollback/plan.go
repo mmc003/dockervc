@@ -41,6 +41,7 @@ type Step struct {
 	InspectJSON json.RawMessage // network/container steps
 	ObjectHash  string          // image/volume steps (CAS hash)
 	Refs        []string        // image re-tags to apply after loading
+	ImageRef    string          // exact image used by a create-container step
 	Vol         model.VolumeRecord
 	Running     bool // container step → follow-up start
 }
@@ -221,6 +222,9 @@ type Scope struct {
 	Volumes    []string
 	Images     []string // image refs or digests, resolved to digests here
 	Networks   []string
+	// ReuseExistingByName trusts existing named dependencies and creates only
+	// missing selected containers. Validation must run before BuildPlan.
+	ReuseExistingByName bool
 }
 
 // ParseScopeArgs validates scope names against the manifest. Unknown names
@@ -363,6 +367,16 @@ func RestoreTag(snapshotID, containerName string) string {
 	return sanitize(containerName) + "-restored-from-" + snapshotID
 }
 
+// ImageRestoreTag is dockervc-owned and never shadows a public repository
+// tag. All containers sharing an image key receive the same internal tag.
+func ImageRestoreTag(snapshotID, imageKey string) string {
+	key := strings.TrimPrefix(imageKey, "sha256:")
+	if len(key) > 16 {
+		key = key[:16]
+	}
+	return "dockervc/restore:" + sanitize(snapshotID+"-"+key)
+}
+
 // sanitize matches capture's container-name scrubbing so snap and restore
 // tags of the same container line up.
 func sanitize(name string) string {
@@ -389,6 +403,9 @@ func shortRef(ref string) string {
 // steps (removals → networks → images → volumes → creates → starts) plus
 // non-fatal warnings. It touches neither the engine nor the store.
 func BuildPlan(m *model.Manifest, live *LiveState, scope Scope) (steps []Step, warnings []string) {
+	if scope.ReuseExistingByName {
+		return buildReuseExistingByNamePlan(m, live, scope)
+	}
 	warn := func(format string, args ...any) {
 		warnings = append(warnings, fmt.Sprintf(format, args...))
 	}
@@ -578,12 +595,39 @@ func BuildPlan(m *model.Manifest, live *LiveState, scope Scope) (steps []Step, w
 		})
 	}
 
-	// 3. Load images: selected image records, then the committed filesystems
-	// of selected containers (grouped by object so shared/deduped filesystems
-	// load once and carry one restore tag per container).
+	// 3. Resolve/load images. New recipe records use one snapshot-level image
+	// object and a dockervc-owned internal tag. Legacy records retain their
+	// per-container committed-filesystem path below.
+	neededImageKeys := map[string]bool{}
+	for i := range selC {
+		if recreate[selC[i].Name] && selC[i].ImageKey != "" {
+			neededImageKeys[selC[i].ImageKey] = true
+		}
+	}
+	resolvedImages := map[string]string{}
 	for i := range m.Images {
 		irec := &m.Images[i]
-		if !selI[irec.Digest] {
+		if irec.Key != "" {
+			if !selI[irec.Digest] && !neededImageKeys[irec.Key] {
+				continue
+			}
+			identity := irec.ID
+			if identity == "" {
+				identity = irec.Key
+			}
+			if live.ImageDigests[identity] {
+				resolvedImages[irec.Key] = identity
+				steps = append(steps, Step{Kind: StepLoadImage, Skip: true,
+					Name: shortRef(identity), Why: "exact image already present"})
+				continue
+			}
+			internal := ImageRestoreTag(m.ID, irec.Key)
+			resolvedImages[irec.Key] = internal
+			steps = append(steps, Step{Kind: StepLoadImage, Name: internal,
+				ObjectHash: irec.Object, Refs: []string{internal}, Why: "required image missing"})
+			continue
+		}
+		if !selI[irec.Digest] { // legacy standalone image record
 			continue
 		}
 		if irec.Digest != "" && live.ImageDigests[irec.Digest] {
@@ -686,13 +730,22 @@ func BuildPlan(m *model.Manifest, live *LiveState, scope Scope) (steps []Step, w
 		if !recreate[crec.Name] {
 			continue
 		}
-		if crec.ImageObject == "" {
-			warn("container %s has no committed filesystem in the snapshot; not recreated", crec.Name)
+		imageRef := ""
+		switch {
+		case crec.ImageKey != "":
+			imageRef = resolvedImages[crec.ImageKey]
+			if imageRef == "" {
+				warn("container %s references missing image record %s; not recreated", crec.Name, shortRef(crec.ImageKey))
+				continue
+			}
+		case crec.ImageObject == "":
+			warn("container %s has neither an image recipe nor a committed filesystem; not recreated", crec.Name)
 			continue
 		}
 		steps = append(steps, Step{
 			Kind: StepCreateContainer, Name: crec.Name,
 			InspectJSON: crec.InspectJSON,
+			ImageRef:    imageRef,
 			Why:         "recreate from snapshot",
 		})
 	}
@@ -700,7 +753,7 @@ func BuildPlan(m *model.Manifest, live *LiveState, scope Scope) (steps []Step, w
 	// 6. Start recorded-running containers — last, after peers/deps exist.
 	for i := range selC {
 		crec := &selC[i]
-		if !recreate[crec.Name] || crec.ImageObject == "" || !crec.Running {
+		if !recreate[crec.Name] || (crec.ImageObject == "" && resolvedImages[crec.ImageKey] == "") || !crec.Running {
 			continue
 		}
 		steps = append(steps, Step{
@@ -718,6 +771,74 @@ func BuildPlan(m *model.Manifest, live *LiveState, scope Scope) (steps []Step, w
 	}
 
 	return steps, warnings
+}
+
+// ValidateReuseExistingByName verifies the opt-in name-trusting mode before a
+// plan is shown. It deliberately does no content/configuration comparison and
+// never falls back to restoring a missing dependency from the snapshot.
+func ValidateReuseExistingByName(m *model.Manifest, live *LiveState, scope Scope) error {
+	var missing []string
+	for _, rec := range selectContainers(m, scope) {
+		imageRef := containerRecipeImageRef(&rec)
+		if imageRef == "" {
+			missing = append(missing, fmt.Sprintf("container %s: image name is not recorded", rec.Name))
+		} else if !live.HasTag(imageRef) && !live.ImageDigests[imageRef] {
+			missing = append(missing, fmt.Sprintf("container %s: image %s", rec.Name, imageRef))
+		}
+		deps, err := containerDeps(rec.InspectJSON)
+		if err != nil {
+			missing = append(missing, fmt.Sprintf("container %s: dependencies are unreadable", rec.Name))
+			continue
+		}
+		for _, name := range deps.VolumeNames {
+			if !live.VolumeNames[name] {
+				missing = append(missing, fmt.Sprintf("container %s: volume %s", rec.Name, name))
+			}
+		}
+		for _, name := range deps.NetworkNames {
+			if !isBuiltinNetwork(name) && !live.NetworkNames[name] {
+				missing = append(missing, fmt.Sprintf("container %s: network %s", rec.Name, name))
+			}
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return fmt.Errorf("cannot reuse existing entities by name; required entities are missing:\n  - %s",
+			strings.Join(missing, "\n  - "))
+	}
+	return nil
+}
+
+func buildReuseExistingByNamePlan(m *model.Manifest, live *LiveState, scope Scope) ([]Step, []string) {
+	var creates, starts []Step
+	for _, rec := range selectContainers(m, scope) {
+		if live.ContainerIDs[rec.Name] != "" {
+			continue
+		}
+		creates = append(creates, Step{
+			Kind: StepCreateContainer, Name: rec.Name, InspectJSON: rec.InspectJSON,
+			ImageRef: containerRecipeImageRef(&rec), Why: "missing; reuse named dependencies without comparison",
+		})
+		if rec.Running {
+			starts = append(starts, Step{Kind: StepStartContainer, Name: rec.Name, Why: "recorded running"})
+		}
+	}
+	return append(creates, starts...), nil
+}
+
+func containerRecipeImageRef(rec *model.ContainerRecord) string {
+	if rec.ImageRef != "" {
+		return rec.ImageRef
+	}
+	var stored struct {
+		Config struct {
+			Image string `json:"Image"`
+		} `json:"Config"`
+	}
+	if json.Unmarshal(rec.InspectJSON, &stored) == nil {
+		return stored.Config.Image
+	}
+	return ""
 }
 
 func selectContainers(m *model.Manifest, scope Scope) []model.ContainerRecord {
@@ -804,9 +925,12 @@ func imageDisplayName(rec *model.ImageRecord) string {
 
 func containerRecreateReason(snapshotID string, rec *model.ContainerRecord,
 	live *LiveState) (reason string, changed bool, err error) {
-	wantHash, err := dockerapi.ContainerConfigHash(rec.InspectJSON)
-	if err != nil {
-		return "", false, err
+	wantHash := rec.ConfigHash
+	if wantHash == "" {
+		wantHash, err = dockerapi.ContainerConfigHash(rec.InspectJSON)
+		if err != nil {
+			return "", false, err
+		}
 	}
 	gotHash, comparable := live.ContainerConfigHashes[rec.Name]
 	if !comparable {
@@ -818,16 +942,20 @@ func containerRecreateReason(snapshotID string, rec *model.ContainerRecord,
 		return "configuration changed", true, nil
 	}
 
-	var stored struct {
-		Image string `json:"Image"`
-	}
-	if err := json.Unmarshal(rec.InspectJSON, &stored); err != nil {
-		return "", false, fmt.Errorf("parse stored image identity: %w", err)
+	wantImage := rec.ImageID
+	if wantImage == "" {
+		var stored struct {
+			Image string `json:"Image"`
+		}
+		if err := json.Unmarshal(rec.InspectJSON, &stored); err != nil {
+			return "", false, fmt.Errorf("parse stored image identity: %w", err)
+		}
+		wantImage = stored.Image
 	}
 	liveImage := live.ContainerImages[rec.Name]
 	liveRef := strings.TrimSuffix(live.ContainerImageRefs[rec.Name], ":latest")
 	restoreRef := strings.TrimSuffix(RestoreTag(snapshotID, rec.Name), ":latest")
-	if stored.Image != "" && liveImage != stored.Image && liveRef != restoreRef {
+	if wantImage != "" && liveImage != wantImage && liveRef != restoreRef {
 		return "image changed", true, nil
 	}
 	return "unchanged", false, nil

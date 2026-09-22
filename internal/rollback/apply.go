@@ -137,9 +137,11 @@ func (e *Executor) applyStep(ctx context.Context, p *Plan, s Step,
 		return err
 
 	case StepCreateContainer:
-		// The container runs under its deterministic restore tag — present
-		// whether the image was just loaded or already existed.
-		id, warns, err := e.Cli.ContainerCreateFromInspect(ctx, s.InspectJSON, RestoreTag(p.SnapshotID, s.Name))
+		imageRef := s.ImageRef
+		if imageRef == "" { // legacy committed-filesystem snapshot
+			imageRef = RestoreTag(p.SnapshotID, s.Name)
+		}
+		id, warns, err := e.Cli.ContainerCreateFromInspect(ctx, s.InspectJSON, imageRef)
 		if err != nil {
 			return err
 		}
