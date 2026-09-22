@@ -86,10 +86,74 @@ func (t *tui) rollbackChecklist(id, kind string, items []listItem, lists map[str
 	})
 }
 
-// rollbackWithScope finishes every path: an optional dry-run preview (its
-// plan stays on screen under the confirm) and the apply prompt.
+// rollbackWithScope asks how selected containers should be handled, then
+// finishes with the dry-run/apply prompts. Non-container scopes go directly
+// to the ordinary snapshot-restore flow.
 func (t *tui) rollbackWithScope(id string, scope []string) {
 	if scope == nil {
+		return
+	}
+	if !rollbackScopeHasContainers(scope) {
+		t.rollbackFinish(id, scope, false)
+		return
+	}
+	items := []listItem{
+		{
+			text: "restore containers and dependencies to the snapshot",
+			note: "ordinary rollback", value: "restore",
+		},
+		{
+			text: "recreate using current images, volumes, and networks",
+			note: "replace selected containers; keep dependency data", value: "current",
+		},
+		{
+			text: "create only containers that are missing",
+			note: "leave existing containers and dependencies unchanged", value: "missing",
+		},
+	}
+	t.askListOne("what should happen to selected containers?", items, func(strategy string, ok bool) {
+		if !ok {
+			return
+		}
+		flag, valid := rollbackStrategyFlag(strategy)
+		if !valid {
+			t.flash = "unknown rollback strategy"
+			return
+		}
+		selected := append([]string(nil), scope...)
+		if flag != "" {
+			selected = append(selected, flag)
+		}
+		t.rollbackFinish(id, selected, flag != "")
+	})
+}
+
+func rollbackScopeHasContainers(scope []string) bool {
+	for _, arg := range scope {
+		if arg == "--all" || arg == "--containers" {
+			return true
+		}
+	}
+	return false
+}
+
+// rollbackFinish shows a preview and then offers to apply. Name-trusting
+// strategies always preview because their most important behavior is what
+// they deliberately leave untouched.
+func (t *tui) rollbackFinish(id string, scope []string, requirePreview bool) {
+	apply := func() {
+		t.askBool("apply the rollback now?", false, func(yes bool, ok bool) {
+			if !ok || !yes {
+				return
+			}
+			argv := append([]string{"rollback", "--yes"}, scope...)
+			t.execTUI(append(argv, id)...)
+		})
+	}
+	if requirePreview {
+		argv := append([]string{"rollback"}, scope...)
+		t.doExec(append(argv, "--dry-run", id)...)
+		apply()
 		return
 	}
 	t.askBool("preview the restore plan first (dry run)?", true, func(dry bool, ok bool) {
@@ -100,13 +164,7 @@ func (t *tui) rollbackWithScope(id string, scope []string) {
 			argv := append([]string{"rollback"}, scope...)
 			t.doExec(append(argv, "--dry-run", id)...)
 		}
-		t.askBool("apply the rollback now?", false, func(yes bool, ok bool) {
-			if !ok || !yes {
-				return
-			}
-			argv := append([]string{"rollback", "--yes"}, scope...)
-			t.execTUI(append(argv, id)...)
-		})
+		apply()
 	})
 }
 

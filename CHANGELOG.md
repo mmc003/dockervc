@@ -4,6 +4,25 @@ User-facing changes per version. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions match the
 [GitHub releases](https://github.com/mmc003/dockervc/releases).
 
+## v0.8.0 — 2026-09-22
+
+### Container update rollback strategy
+
+- `rollback --recreate-with-current-dependencies` recreates selected
+  containers from snapshot configuration while preserving current same-name
+  images, volume contents, and networks. Required dependencies are verified
+  before the safety checkpoint or any mutation.
+- The existing `--reuse-existing-by-name` mode remains available for creating
+  only missing containers. The line menu and full-screen TUI now offer
+  ordinary snapshot restore, recreate-with-current-dependencies, and
+  missing-only choices.
+- Ordinary container and standalone-image rollback restores an image's
+  original recorded name when it is free. A different image already using
+  that name is reported before checkpointing; replacement requires explicit
+  confirmation (default no), while eligible container restores also show the
+  two current-dependency alternatives. Moving the tag does not delete the
+  previously tagged image object.
+
 ## v0.7.0 — 2026-09-17
 
 ### Snapshot storage accounting

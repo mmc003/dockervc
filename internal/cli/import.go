@@ -111,7 +111,12 @@ the imported snapshot (one confirmation, pre-apply checkpoint by default).`,
 		if err != nil {
 			return fmt.Errorf("inspect live engine: %w", err)
 		}
-		steps, warnings := rollback.BuildPlan(m, live, rollback.Scope{All: true})
+		scope, proceed := prepareImageNameReplacement(cmd, m, live, rollback.Scope{All: true}, false)
+		if !proceed {
+			fmt.Println("Aborted — the snapshot stays imported; no image names or containers were changed.")
+			return nil
+		}
+		steps, warnings := rollback.BuildPlan(m, live, scope)
 		plan := &rollback.Plan{SnapshotID: m.ID, Steps: steps, Warnings: warnings}
 		if len(plan.Steps) == 0 {
 			fmt.Println("Nothing to restore — the engine already matches the snapshot.")

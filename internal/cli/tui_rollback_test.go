@@ -195,3 +195,49 @@ func TestRollbackScopeMenuFlow(t *testing.T) {
 		t.Fatalf("checklist confirm should reach the dry-run prompt, got %+v", tt.dlg)
 	}
 }
+
+func TestRollbackContainerStrategyMenu(t *testing.T) {
+	tt := &tui{w: 80, h: 24}
+	tt.rollbackWithScope("snap-1", []string{"--containers", "demo-web"})
+
+	if tt.dlg == nil || tt.dlg.kind != dlgList || tt.dlg.multi {
+		t.Fatalf("container scope should open strategy list, got %+v", tt.dlg)
+	}
+	if !strings.Contains(tt.dlg.title, "selected containers") || len(tt.dlg.items) != 3 {
+		t.Fatalf("unexpected strategy menu: %+v", tt.dlg)
+	}
+	want := []string{"restore", "current", "missing"}
+	for i, value := range want {
+		if tt.dlg.items[i].value != value {
+			t.Errorf("strategy item %d value=%q, want %q", i, tt.dlg.items[i].value, value)
+		}
+	}
+
+	// The default ordinary restore retains the existing optional-preview flow.
+	tt.dialogKey(0, keyEnter)
+	if tt.dlg == nil || tt.dlg.kind != dlgBool || !strings.Contains(tt.dlg.title, "dry run") {
+		t.Fatalf("restore strategy should reach dry-run prompt, got %+v", tt.dlg)
+	}
+}
+
+func TestRollbackStrategyFlagsAndScopeDetection(t *testing.T) {
+	tests := map[string]string{
+		"restore": "",
+		"current": "--recreate-with-current-dependencies",
+		"missing": "--reuse-existing-by-name",
+	}
+	for strategy, want := range tests {
+		got, ok := rollbackStrategyFlag(strategy)
+		if !ok || got != want {
+			t.Errorf("rollbackStrategyFlag(%q)=(%q,%v), want (%q,true)", strategy, got, ok, want)
+		}
+	}
+	if _, ok := rollbackStrategyFlag("surprise"); ok {
+		t.Fatal("unknown strategy should be rejected")
+	}
+	if !rollbackScopeHasContainers([]string{"--all"}) ||
+		!rollbackScopeHasContainers([]string{"--containers", "demo-web"}) ||
+		rollbackScopeHasContainers([]string{"--volumes", "data"}) {
+		t.Fatal("container-scope detection returned the wrong result")
+	}
+}

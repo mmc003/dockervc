@@ -713,8 +713,9 @@ Tests required before stabilizing the format:
 ## Planned feature: dependency-aware container reconciliation
 
 Status: implementation underway. Reconciliation Stage 1 is committed in
-`9223a5e`; the core reference-only recipe work described below was implemented
-locally on 2026-09-22 and is undergoing full integration verification.
+`9223a5e`; the core reference-only recipe work described below is committed in
+`5da9882`. The current-dependency container redeployment strategy was
+implemented locally on 2026-09-22 and is undergoing final verification.
 
 ### Goal
 
@@ -777,7 +778,7 @@ safe before changing the snapshot format.
 
 ### Implementation checkpoint: reconciliation Stage 2 core
 
-Implemented locally on 2026-09-22:
+Implemented on 2026-09-22 and committed as `5da9882`:
 
 - `ContainerRecord` now has backward-compatible `ImageRef`, `ImageID`,
   `ImageKey`, and `ConfigHash` recipe fields. `ImageObject` and `LayerHash`
@@ -803,6 +804,24 @@ Implemented locally on 2026-09-22:
   dependency aborts planning.
 - Added manifest compatibility, tag-neutral archive, shared-image planning,
   exact-image reuse, and reuse-by-name tests.
+- Added `rollback --recreate-with-current-dependencies` as a distinct
+  redeployment/update strategy. It preflights current same-name image,
+  volume, and network dependencies, removes every selected live container,
+  and recreates it from snapshot configuration without loading, restoring,
+  replacing, retagging, or comparing those dependencies. Missing selected
+  containers are created; recorded running state is reapplied.
+- Both guided interfaces offer ordinary snapshot reconciliation,
+  recreate-with-current-dependencies, and missing-only strategies. The
+  full-screen TUI always previews the two name-trusting strategies before
+  offering to apply them.
+- Ordinary container and standalone-image restoration now prefers the
+  recorded original image reference. Free names are restored automatically;
+  a name owned by a different or unverifiable image is reported before the
+  safety checkpoint and requires explicit replacement confirmation, default
+  no. When all container dependencies exist, the conflict output also offers
+  the missing-only and recreate-with-current-dependencies alternatives.
+- This feature batch is versioned as `0.8.0`; it adds public rollback modes
+  and image-name replacement policy rather than patching existing behavior.
 
 Still pending before Stage 2 is complete: richer per-entity dry-run/status
 output and storage accounting, broader portable/doctor/prune compatibility
@@ -903,12 +922,15 @@ policy:
    and layer bytes.
 4. Keep original tags only as `ImageRecord.Refs` provenance.
 5. On restore, load the tag-neutral object, verify the resulting identity,
-   and apply only a dockervc-owned internal tag such as
-   `dockervc/restore:<snapshot>-<digest-prefix>`.
+   and reapply its recorded original reference when that name is free. Use a
+   dockervc-owned internal tag such as
+   `dockervc/restore:<snapshot>-<digest-prefix>` only as the safe fallback for
+   an unconfirmed conflict or a record without an original reference.
 
-Never silently retag `openclaw-dev-base:1.0` or another public reference while
-restoring a container. Explicit standalone image restoration may later offer
-a separate, confirmed retag policy.
+Never silently retag `openclaw-dev-base:1.0` or another occupied public
+reference. Container and standalone-image restoration share one confirmed
+replacement policy: identify the conflict before the safety checkpoint,
+default to no, and leave the prior image object intact if its tag is moved.
 
 #### Stage 2.4: dual-path restore planning
 
@@ -916,10 +938,11 @@ Resolve a selected container's image dependency before deciding whether the
 container needs recreation:
 
 - exact image ID/digest present: reuse it without loading or tagging;
-- required image absent: load its snapshot image object once and assign an
-  internal restore reference;
-- original public tag now points elsewhere: preserve that tag and use the
-  exact snapshot image through the internal reference;
+- required image absent and original reference free: load its snapshot image
+  object once and restore that original reference;
+- original public tag now points elsewhere: stop for explicit confirmation;
+  on approval, move the tag to the exact snapshot image, otherwise abort the
+  CLI operation (the pure planner retains an internal-reference fallback);
 - several selected containers share the image: emit one load step and give
   all create steps the same resolved reference.
 
@@ -1178,6 +1201,141 @@ Volume restoration is not atomic: clear-and-extract may fail partway through.
 The safety checkpoint is the recovery mechanism, rerunning must be idempotent,
 and failure output must identify completed, partial, and untouched entities.
 
+### Possible feature: changed-files-only volume restoration
+
+Status: design candidate only; do not change the safe whole-volume restore
+default until the semantics, recovery path, and Docker integration tests are
+complete.
+
+The existing deep comparison already identifies regular-file, link, type,
+mode, creation, modification, and deletion differences by path. A future
+selective mode could apply that exact delta instead of clearing and extracting
+the entire volume:
+
+```powershell
+dockervc rollback <snapshot> --volumes <volume> --changed-files-only
+```
+
+Exact delta semantics:
+
+- A path created after the snapshot is removed.
+- A path modified after the snapshot is replaced with the snapshot version.
+- A path deleted after the snapshot is recreated from the snapshot.
+- A path whose type changed is removed safely before restoring the recorded
+  type (for example, file to directory or symlink to regular file).
+- Unchanged paths are never rewritten.
+- The Docker volume object and name remain unchanged.
+- This is still an exact restore to the selected snapshot, not a merge that
+  keeps arbitrary newer files.
+
+Default and fallback policy:
+
+- Whole-volume clear-and-extract remains the default because it is simpler to
+  reason about and is safer for application datasets whose files form one
+  consistency unit.
+- Selective restore must be explicit and must print a warning for databases
+  and other multi-file state. Restoring only part of a database directory can
+  combine files from incompatible points in time even when every selected
+  file is individually valid.
+- Automatically fall back to whole-volume restoration, with an explanation,
+  when the snapshot lacks a usable file index, the diff is unverifiable,
+  archive paths are unsafe, hard-link dependency closure cannot be resolved,
+  unsupported special files are involved, or the delta is large enough that
+  selective application offers no meaningful benefit.
+- Never silently downgrade from exact content comparison to metadata-only
+  comparison to enable this feature.
+
+Required index-format work:
+
+- The current file index omits directory entries because full extraction can
+  reconstruct ordinary parents. Selective exact restore needs directory
+  entries, including empty directories, permissions, timestamps where
+  preserved, and relevant archive metadata.
+- Add a backward-compatible index generation/version field so restore can
+  distinguish indexes capable of exact selective application from older
+  indexes.
+- Represent hard-link targets and enough dependency information to include a
+  link's required target in the restore closure.
+- Decide and document support for device nodes, FIFOs, sockets, xattrs, ACLs,
+  ownership, Windows/Docker Desktop translation, and PAX metadata. Unsupported
+  entries must trigger a safe fallback rather than partial guessing.
+- Tar entry offsets are not directly seekable inside current zstd-compressed
+  CAS objects. The first implementation may stream the full stored archive and
+  filter entries while writing only selected paths. A future seekable index or
+  per-file object layout can be evaluated separately.
+
+Proposed planning flow:
+
+1. Run the existing exact deep comparison and obtain sorted created,
+   modified, deleted, and type-changed path sets.
+2. Expand the mutation set to include required parent directories, hard-link
+   targets, and metadata dependencies.
+3. Produce a dry-run section listing every path action and whether selective
+   restore is supported or will fall back to whole-volume restore.
+4. Ask for explicit confirmation and create a safety checkpoint before any
+   path mutation. The first safe implementation may retain a full-volume
+   checkpoint even though the forward restore is selective.
+5. Stop every attached running container, including shared-volume users
+   outside the selected container scope, using the same group-safety rules as
+   whole-volume restore.
+6. Revalidate and normalize every target path below the mounted volume root;
+   reject absolute paths, traversal, symlink escapes, and root deletion.
+7. Remove live-only paths and type conflicts in depth-first order so children
+   are handled before parents.
+8. Stream the snapshot volume tar, extracting only the restore closure into a
+   staging area inside the same volume when possible.
+9. Move staged entries into place, then apply directory metadata after child
+   extraction. Never expose an archive-controlled path outside the volume.
+10. Verify restored paths against snapshot hashes/metadata and verify selected
+    deletions are absent.
+11. Restart only containers that were running before the operation, unless a
+    selected container recipe requires a different desired state.
+12. Report restored, deleted, unchanged, fallen-back, partial, and failed path
+    counts plus the checkpoint needed for recovery.
+
+Atomicity and recovery:
+
+- Selective restoration is not transactionally atomic across many paths.
+  Staging plus same-filesystem rename can make individual regular-file
+  replacement atomic, but the whole mutation set can still fail midway.
+- Keep the volume safety checkpoint mandatory by default. `--keep-current`
+  must carry the same explicit recovery warning as whole-volume restore.
+- A failure report must distinguish paths not started, staged, replaced,
+  deleted, verified, and failed.
+- Rerunning the same selective restore must be idempotent.
+- Cancellation is accepted only at safe boundaries; cleanup must remove
+  staging paths without deleting restored or unrelated live data.
+
+Performance expectations:
+
+- The live volume still needs a complete read/hash pass to prove which files
+  changed under exact comparison rules.
+- Without a seekable archive index, the stored snapshot archive may also need
+  a complete sequential read to locate selected entries.
+- The primary savings are less deletion, extraction, and write amplification,
+  especially when a small number of files changed in a large volume.
+- This feature complements but does not replace the ranked scan/checkpoint
+  optimizations. Staged scan reuse and scoped safety checkpoints can reduce
+  the remaining full-volume reads.
+
+Required tests:
+
+- Created paths are removed; modified and deleted paths are restored.
+- Unchanged files retain content, metadata, inode where reasonably portable,
+  and modification time because they are not rewritten.
+- Empty directories, nested deletion ordering, file/directory type swaps,
+  symlinks, hard links, permissions, and long/PAX paths behave correctly.
+- Absolute paths, `..`, symlink escapes, root targets, duplicate tar entries,
+  and malicious link targets are rejected before mutation.
+- A shared volume stops/restarts the complete safe container group.
+- Cancellation and injected failures at every stage leave a recoverable,
+  accurately reported state and no unsafe staging debris.
+- Legacy/no-index snapshots and unsupported entry types fall back safely.
+- A large-delta policy selects whole-volume restore deterministically.
+- Selective restore followed by a fresh exact deep scan reports no drift.
+- Database-style fixture documentation demonstrates why the mode remains
+  explicit rather than automatic.
+
 ### Bind mounts
 
 - If contents were not captured, reuse/remount the host path without changing
@@ -1232,7 +1390,7 @@ file, and required volumes are scanned sequentially.
 | 1 | Scope the safety checkpoint to the mutation graph | Critical | Medium | Removes unrelated image/volume/container capture from nearly every applied partial rollback while preserving recovery for everything the plan can change. |
 | 2 | Reuse the deep-scan stream as staged checkpoint data | Critical | High | Eliminates the second complete read of every changed volume; this is the largest remaining I/O reduction after checkpoint scoping. |
 | 3 | Move final confirmation before checkpoint capture | High | Low | Prevents an expensive checkpoint when the user declines the plan and fixes the current surprising confirmation order. Low-risk, quick improvement. |
-| 4 | Add bounded parallel volume comparison | High | Medium | Independent volumes can scan concurrently; a limit of two should improve throughput without overwhelming Docker Desktop or the underlying disk. |
+| 4 | Add bounded parallel volume comparison, starting with `status --deep` | High | Medium | Independent volumes can scan concurrently; the read-only status path is the safest proving ground. Start with two helpers before considering rollback parallelism. |
 | 5 | Show live TUI phase, volume, bytes, rate, and ETA | High | Medium | Does not reduce I/O, but makes long correct scans distinguishable from hangs and exposes which phase needs optimization. Reuse the existing progress reporter/tracker rather than creating a second calculation path. |
 | 6 | Optimize clear-and-extract restoration | Medium-High | Medium-High | `find /dst -mindepth 1 -delete` is costly for many small files. Benchmark safe alternatives and the extraction transport before changing destructive code. |
 | 7 | Add Docker responsiveness preflight and timing diagnostics | Medium | Low | Separates dockervc cost from slow Docker API/desktop behavior and records per-phase timings for evidence-driven work. |
@@ -1277,18 +1435,107 @@ The checkpoint remains mandatory by default after confirmation. If checkpoint
 creation fails, abort before the first mutation. This change improves aborted
 rollback time but does not weaken recovery guarantees for an applied rollback.
 
-#### Rank 4: bounded concurrent comparison
+#### Rank 4: bounded concurrent comparison (`status --deep` first)
 
-- Scan only independent required volumes concurrently.
-- Default concurrency should start at two and be configurable only after
-  Docker Desktop, native Linux, and slow-disk measurements justify it.
-- Keep output deterministic by collecting results and ordering them by the
-  manifest, regardless of completion order.
-- Use one cancellable group: cancellation or a fatal context error stops all
-  helpers and waits for cleanup.
-- Progress must aggregate total bytes while still naming each active volume.
-- Do not concurrently mutate volumes; parallelism applies to read-only
-  comparison only.
+Current behavior:
+
+- `status --deep` sorts the selected volume names, then awaits one complete
+  `DiffLiveVolumeTracked` call before starting the next.
+- Only one actively scanning `dockervc-tar-*` helper normally exists. A prior
+  helper may briefly overlap during asynchronous removal, but that is cleanup,
+  not useful parallel work.
+- Large volumes and many-small-file volumes therefore add their scan times
+  together even when the Docker host has spare I/O and CPU capacity.
+
+Phase A — read-only `status --deep` implementation:
+
+- Replace the sequential scan loop with a bounded worker pool.
+- Begin with a hard default concurrency of two. Do not expose a public tuning
+  flag until measurements show that users benefit from changing it.
+- Each worker owns one independent `VolumeTarStream` and therefore one unique
+  temporary `dockervc-tar-*` helper container.
+- Never schedule the same volume more than once, even when selectors contain
+  duplicates or several higher-level entities reference it.
+- Feed workers from the already sorted volume-name list, store results by
+  input position/name, and render final drift output in deterministic sorted
+  order regardless of completion order.
+- Preserve current best-effort behavior: a normal scan failure marks that
+  volume unavailable and does not prevent unrelated volumes from finishing.
+- Treat context cancellation as global: stop scheduling, cancel every active
+  helper stream, wait for all workers and helper cleanup, then return the
+  cancellation error.
+- Bound channels and progress delivery so a slow terminal cannot block tar
+  streaming or hashing.
+- Keep the operation strictly read-only. No volume contents, container state,
+  snapshot records, or CAS objects may be changed by `status --deep`.
+
+Concurrent progress design:
+
+- Do not let independent per-volume console renderers overwrite or interleave
+  terminal lines.
+- Give each worker a lightweight per-volume byte counter and send structured
+  updates to one coordinator.
+- The coordinator owns the reporter and displays aggregate bytes/rate/ETA plus
+  the names of active volumes. Estimated totals are the sum of each selected
+  snapshot index's estimated tar bytes.
+- Redirected output should emit starts, completions, failures, and periodic
+  aggregate updates without ANSI control sequences.
+- The future TUI view should show both overall progress and up to the active
+  worker limit, for example:
+
+  ```text
+  deep status  2 / 5 volumes  1.8 GiB / ~4.2 GiB  96 MiB/s  ~ETA 00:25
+    scanning openclaw_dev_home
+    scanning postgres_data
+  ```
+
+Concurrency and resource rules:
+
+- Two helpers is the initial ceiling, not an assumption that more is always
+  faster. Multiple volumes may reside on the same Docker Desktop virtual disk,
+  where excess concurrency increases contention and total elapsed time.
+- Each worker hashes file content locally while Docker generates a tar stream;
+  benchmark CPU, disk, daemon, pipe, and memory pressure before raising the
+  limit.
+- Do not start a helper for missing volumes or snapshots without a comparable
+  file index.
+- Unique helper names already prevent naming collisions; tests must still
+  prove all helpers are removed on success, error, and cancellation.
+
+Phase B — possible rollback reuse:
+
+- After the `status --deep` worker pool passes race, cancellation, cleanup,
+  and performance tests, extract the generic read-only scan coordinator for
+  rollback reconciliation.
+- Rollback may reuse parallel comparison only; volume clearing, extraction,
+  container stop/start, and every other mutation remain ordered and
+  sequential.
+- Do not enable rollback parallelism if it complicates staged checkpoint
+  reuse or makes the Rank 1/2 optimizations less safe.
+
+Required tests:
+
+- A blocking fake tar opener proves that two scans overlap and a third waits.
+- Maximum observed concurrency never exceeds the configured worker limit.
+- Duplicate selectors produce one scan/helper.
+- Results remain sorted when workers finish out of order.
+- One scan failure does not cancel successful peers; all errors are joined.
+- Context cancellation releases blocked readers, waits for workers, and leaves
+  no helper containers.
+- Progress aggregation remains race-free and non-blocking under a slow
+  reporter (`go test -race ./internal/cli ./internal/snapshot`).
+- Concurrency one produces results identical to the current sequential path.
+
+Benchmark before selecting the final default:
+
+- Run concurrency 1, 2, and 4 against two and four independent volumes.
+- Include large-file, many-small-file, mixed-size, and same-physical-disk
+  fixtures on Docker Desktop and native Linux.
+- Record total elapsed time, time to first byte, per-volume and aggregate
+  throughput, Docker daemon latency, CPU, memory, and helper cleanup time.
+- Keep two as the default only if it provides a repeatable improvement without
+  unacceptable tail latency or daemon instability; otherwise default to one
+  while retaining the tested coordinator for hosts that can benefit later.
 
 #### Rank 5: visible progress and phase timings
 

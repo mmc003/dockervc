@@ -85,7 +85,7 @@ func liveEmpty() *LiveState {
 		VolumeNames: map[string]bool{}, VolumeUsers: map[string][]ContainerUse{},
 		VolumeStates: map[string]EntityState{}, VolumeDiffs: map[string]string{},
 		NetworkNames: map[string]bool{}, NetworkInspects: map[string]json.RawMessage{},
-		ImageDigests: map[string]bool{}, ImageTags: map[string]bool{},
+		ImageDigests: map[string]bool{}, ImageTags: map[string]bool{}, ImageTagIDs: map[string]string{},
 		RunningNames: map[string]bool{},
 	}
 }
@@ -404,9 +404,8 @@ func TestBuildPlanReferenceRecipesShareOneImageLoad(t *testing.T) {
 	if len(warnings) != 0 {
 		t.Fatalf("warnings: %v", warnings)
 	}
-	internal := ImageRestoreTag(m.ID, "sha256:shared")
-	load := findStep(steps, StepLoadImage, internal)
-	if load == nil || load.ObjectHash != "objshared" || len(load.Refs) != 1 || load.Refs[0] != internal {
+	load := findStep(steps, StepLoadImage, "example/app:latest")
+	if load == nil || load.ObjectHash != "objshared" || len(load.Refs) != 1 || load.Refs[0] != "example/app:latest" {
 		t.Fatalf("shared image load = %+v", load)
 	}
 	loads := 0
@@ -414,8 +413,8 @@ func TestBuildPlanReferenceRecipesShareOneImageLoad(t *testing.T) {
 		if step.Kind == StepLoadImage && !step.Skip {
 			loads++
 		}
-		if step.Kind == StepCreateContainer && step.ImageRef != internal {
-			t.Fatalf("container %s image ref = %q, want %q", step.Name, step.ImageRef, internal)
+		if step.Kind == StepCreateContainer && step.ImageRef != "example/app:latest" {
+			t.Fatalf("container %s image ref = %q, want original image name", step.Name, step.ImageRef)
 		}
 	}
 	if loads != 1 {
@@ -435,16 +434,97 @@ func TestBuildPlanReferenceRecipeReusesExactImageID(t *testing.T) {
 	}}
 	ls := liveEmpty()
 	ls.ImageDigests["sha256:exact"] = true
+	ls.ImageTags["mirror/app:latest"] = true
+	ls.ImageTagIDs["mirror/app:latest"] = "sha256:exact"
 
 	steps, _ := BuildPlan(m, ls, Scope{Containers: []string{"demo-web"}})
 	create := findStep(steps, StepCreateContainer, "demo-web")
-	if create == nil || create.ImageRef != "sha256:exact" {
-		t.Fatalf("create step = %+v, want exact image ID", create)
+	if create == nil || create.ImageRef != "public/app:latest" {
+		t.Fatalf("create step = %+v, want restored original image name", create)
+	}
+	tag := findStep(steps, StepLoadImage, "sha256:exact")
+	if tag == nil || tag.ObjectHash != "" || len(tag.Refs) != 1 || tag.Refs[0] != "public/app:latest" {
+		t.Fatalf("exact image should be tagged with its original name: %+v", tag)
 	}
 	for _, step := range steps {
-		if step.Kind == StepLoadImage && !step.Skip {
+		if step.Kind == StepLoadImage && step.ObjectHash != "" {
 			t.Fatalf("exact image should not be loaded: %+v", step)
 		}
+	}
+}
+
+func TestBuildPlanImageNameConflictRequiresPermission(t *testing.T) {
+	m := fixtureManifest()
+	m.Containers = m.Containers[:1]
+	m.Containers[0].ImageObject = ""
+	m.Containers[0].ImageID = "sha256:snapshot"
+	m.Containers[0].ImageKey = "sha256:snapshot"
+	m.Containers[0].ImageRef = "public/app:latest"
+	m.Images = []model.ImageRecord{{
+		ID: "sha256:snapshot", Key: "sha256:snapshot", Digest: "sha256:snapshot",
+		Refs: []string{"public/app:latest"}, Object: "objsnapshot",
+	}}
+	ls := liveEmpty()
+	ls.ImageTags["public/app:latest"] = true
+	ls.ImageTagIDs["public/app:latest"] = "sha256:current"
+	scope := Scope{Containers: []string{"demo-web"}}
+
+	conflicts := ConflictingImageNames(m, ls, scope)
+	if len(conflicts) != 1 || conflicts[0].Ref != "public/app:latest" ||
+		len(conflicts[0].Containers) != 1 || conflicts[0].Containers[0] != "demo-web" {
+		t.Fatalf("conflicts = %+v", conflicts)
+	}
+	steps, warnings := BuildPlan(m, ls, scope)
+	internal := ImageRestoreTag(m.ID, "sha256:snapshot")
+	if create := findStep(steps, StepCreateContainer, "demo-web"); create == nil || create.ImageRef != internal {
+		t.Fatalf("unconfirmed conflict should preserve public name and use internal ref: %+v", create)
+	}
+	if !hasStr(warnings, "--reuse-existing-by-name") || !hasStr(warnings, "--recreate-with-current-dependencies") {
+		t.Fatalf("conflict alternatives missing: %v", warnings)
+	}
+
+	scope.ReplaceConflictingImageNames = true
+	steps, warnings = BuildPlan(m, ls, scope)
+	load := findStep(steps, StepLoadImage, "public/app:latest")
+	if load == nil || load.ObjectHash != "objsnapshot" || len(load.Refs) != 1 || load.Refs[0] != "public/app:latest" {
+		t.Fatalf("confirmed conflict should restore original name: %+v", load)
+	}
+	if create := findStep(steps, StepCreateContainer, "demo-web"); create == nil || create.ImageRef != "public/app:latest" {
+		t.Fatalf("confirmed conflict create = %+v", create)
+	}
+	if !hasStr(warnings, "previously tagged image object is not deleted") {
+		t.Fatalf("replacement consequence missing: %v", warnings)
+	}
+}
+
+func TestBuildPlanStandaloneImageRestoresOriginalName(t *testing.T) {
+	m := fixtureManifest()
+	m.Images = []model.ImageRecord{{
+		ID: "sha256:snapshot", Key: "sha256:snapshot", Digest: "sha256:snapshot",
+		Refs: []string{"public/app:latest"}, Object: "objsnapshot",
+	}}
+	scope := Scope{Images: []string{"sha256:snapshot"}}
+	steps, warnings := BuildPlan(m, liveEmpty(), scope)
+	if len(warnings) != 0 {
+		t.Fatalf("warnings: %v", warnings)
+	}
+	load := findStep(steps, StepLoadImage, "public/app:latest")
+	if load == nil || load.ObjectHash != "objsnapshot" || len(load.Refs) != 1 || load.Refs[0] != "public/app:latest" {
+		t.Fatalf("standalone image load = %+v", load)
+	}
+
+	ls := liveEmpty()
+	ls.ImageTags["public/app:latest"] = true
+	ls.ImageTagIDs["public/app:latest"] = "sha256:current"
+	conflicts := ConflictingImageNames(m, ls, scope)
+	if len(conflicts) != 1 || !conflicts[0].Standalone {
+		t.Fatalf("standalone conflicts = %+v", conflicts)
+	}
+	scope.ReplaceConflictingImageNames = true
+	steps, _ = BuildPlan(m, ls, scope)
+	load = findStep(steps, StepLoadImage, "public/app:latest")
+	if load == nil || load.Refs[0] != "public/app:latest" {
+		t.Fatalf("confirmed standalone conflict should replace original tag: %+v", load)
 	}
 }
 
@@ -459,7 +539,7 @@ func TestReuseExistingByNameCreatesOnlyContainer(t *testing.T) {
 	ls.NetworkNames["demo-net"] = true
 	scope := Scope{Containers: []string{"demo-worker"}, ReuseExistingByName: true}
 
-	if err := ValidateReuseExistingByName(m, ls, scope); err != nil {
+	if err := ValidateExistingDependenciesByName(m, ls, scope); err != nil {
 		t.Fatal(err)
 	}
 	steps, warnings := BuildPlan(m, ls, scope)
@@ -486,6 +566,64 @@ func TestReuseExistingByNameRejectsMissingDependency(t *testing.T) {
 	err := ValidateReuseExistingByName(m, ls, Scope{Containers: []string{"demo-worker"}})
 	if err == nil || !strings.Contains(err.Error(), "volume demo-data") || !strings.Contains(err.Error(), "network demo-net") {
 		t.Fatalf("missing dependency error = %v", err)
+	}
+}
+
+func TestRecreateWithCurrentDependenciesReplacesContainerOnly(t *testing.T) {
+	m := fixtureManifest()
+	ls := liveEmpty()
+	ls.ContainerIDs["demo-worker"] = "live-worker"
+	ls.ImageTags["busybox:latest"] = true
+	ls.VolumeNames["demo-data"] = true
+	ls.NetworkNames["demo-net"] = true
+	scope := Scope{
+		Containers:                      []string{"demo-worker"},
+		RecreateWithCurrentDependencies: true,
+	}
+
+	if err := ValidateExistingDependenciesByName(m, ls, scope); err != nil {
+		t.Fatal(err)
+	}
+	steps, warnings := BuildPlan(m, ls, scope)
+	if len(steps) != 3 {
+		t.Fatalf("steps=%v, want remove/create/start", steps)
+	}
+	if steps[0].Kind != StepRemoveContainer || steps[0].ContainerID != "live-worker" ||
+		steps[1].Kind != StepCreateContainer || steps[1].ImageRef != "busybox:latest" ||
+		steps[2].Kind != StepStartContainer {
+		t.Fatalf("unexpected recreate-current plan: %+v", steps)
+	}
+	if !hasStr(warnings, "reused by name without") {
+		t.Fatalf("warnings=%v, want explicit name-reuse warning", warnings)
+	}
+	for _, step := range steps {
+		if step.Kind == StepLoadImage || step.Kind == StepRestoreVolume || step.Kind == StepCreateNetwork {
+			t.Fatalf("recreate-current plan mutates a dependency: %+v", step)
+		}
+	}
+}
+
+func TestRecreateWithCurrentDependenciesHonorsStoppedState(t *testing.T) {
+	m := fixtureManifest()
+	ls := liveEmpty()
+	ls.ImageTags["busybox:latest"] = true
+	scope := Scope{
+		Containers:                      []string{"demo-sidecar"},
+		RecreateWithCurrentDependencies: true,
+	}
+
+	if err := ValidateExistingDependenciesByName(m, ls, scope); err != nil {
+		t.Fatal(err)
+	}
+	steps, _ := BuildPlan(m, ls, scope)
+	if len(steps) != 1 || steps[0].Kind != StepCreateContainer || steps[0].ImageRef != "busybox:latest" {
+		t.Fatalf("missing stopped container plan = %+v, want create only", steps)
+	}
+
+	ls.ContainerIDs["demo-sidecar"] = "live-sidecar"
+	steps, _ = BuildPlan(m, ls, scope)
+	if len(steps) != 2 || steps[0].Kind != StepRemoveContainer || steps[1].Kind != StepCreateContainer {
+		t.Fatalf("existing stopped container plan = %+v, want remove/create without start", steps)
 	}
 }
 

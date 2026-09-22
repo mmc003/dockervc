@@ -124,14 +124,33 @@ Restore a snapshot (fully or in part):
 dockervc rollback snap-... --dry-run     # print the restore plan, change nothing
 dockervc rollback snap-... --all         # restore everything it captured
 dockervc rollback snap-... --volumes demo-data   # just some volumes (or --containers/--images/--networks)
+dockervc rollback snap-... --containers app --recreate-with-current-dependencies
+dockervc rollback snap-... --containers app --reuse-existing-by-name
 ```
 
-A rollback stops and removes same-named containers, replaces volume contents
-exactly (files created after the snapshot don't survive), recreates containers
-from their recorded config and starts the ones that were running — existing
-networks and images are reused, never deleted. Unless `--keep-current`, a
-pre-rollback checkpoint snapshot is taken first, so the rollback itself can be
-rolled back. Broken snapshots (missing object files) are refused outright.
+An ordinary rollback compares live state first: unchanged containers and
+volumes are retained, while changed container configuration/images are
+recreated and changed volume contents are replaced exactly. The
+`--recreate-with-current-dependencies` strategy instead treats the snapshot as
+a container configuration recipe: it recreates selected containers while
+keeping the current same-name image, volume contents, and networks. The
+`--reuse-existing-by-name` strategy is narrower and creates only missing
+containers. Both name-based strategies abort if a required dependency is
+missing, and `--all` means all snapshot containers rather than restoring
+independent snapshot resources. The guided CLI offers all three strategies.
+
+When an ordinary container or image rollback needs a captured image, dockervc
+restores its original recorded image name whenever that name is free. If the
+name currently points to a different image, dockervc reports both identities
+before the safety checkpoint. Container restores also show the two
+current-dependency strategies when all their named dependencies are present;
+otherwise dockervc asks before moving the conflicting tag to the exact
+snapshot image. The default answer is no. Replacing a tag does not delete the
+previous image object.
+
+Unless `--keep-current`, a pre-rollback checkpoint snapshot is taken first, so
+the operation can itself be rolled back. Broken snapshots (missing object
+files) are refused outright.
 
 Move a snapshot to another machine (or off-site path) as one portable file:
 

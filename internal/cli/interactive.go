@@ -179,14 +179,15 @@ func resetCommandFlags() {
 	doctorRepair = false
 	doctorDeep = false
 	rollbackOpts = struct {
-		all         bool
-		containers  []string
-		volumes     []string
-		images      []string
-		networks    []string
-		dryRun      bool
-		keepCurrent bool
-		reuseByName bool
+		all             bool
+		containers      []string
+		volumes         []string
+		images          []string
+		networks        []string
+		dryRun          bool
+		keepCurrent     bool
+		reuseByName     bool
+		recreateCurrent bool
 	}{}
 	exportOpts = struct {
 		out    string
@@ -272,42 +273,61 @@ func guidedRollback(r *bufio.Reader) []string {
 		fmt.Println("nothing selected — a rollback must name what it restores.")
 		return nil
 	}
-	if (wantC || len(m.Containers) == 0) && (wantV || len(m.Volumes) == 0) &&
-		(wantI || len(m.Images) == 0) && (wantN || len(m.Networks) == 0) {
-		return []string{"rollback", id, "--all"}
-	}
+	allSelected := (wantC || len(m.Containers) == 0) && (wantV || len(m.Volumes) == 0) &&
+		(wantI || len(m.Images) == 0) && (wantN || len(m.Networks) == 0)
 	argv := []string{"rollback", id}
-	if wantC {
-		names := make([]string, 0, len(m.Containers))
-		for i := range m.Containers {
-			names = append(names, m.Containers[i].Name)
-		}
-		argv = append(argv, "--containers", strings.Join(names, ","))
-	}
-	if wantV {
-		names := make([]string, 0, len(m.Volumes))
-		for i := range m.Volumes {
-			names = append(names, m.Volumes[i].Name)
-		}
-		argv = append(argv, "--volumes", strings.Join(names, ","))
-	}
-	if wantI {
-		names := make([]string, 0, len(m.Images))
-		for i := range m.Images {
-			if len(m.Images[i].Refs) > 0 {
-				names = append(names, m.Images[i].Refs[0])
-			} else {
-				names = append(names, m.Images[i].Digest)
+	if allSelected {
+		argv = append(argv, "--all")
+	} else {
+		if wantC {
+			names := make([]string, 0, len(m.Containers))
+			for i := range m.Containers {
+				names = append(names, m.Containers[i].Name)
 			}
+			argv = append(argv, "--containers", strings.Join(names, ","))
 		}
-		argv = append(argv, "--images", strings.Join(names, ","))
+		if wantV {
+			names := make([]string, 0, len(m.Volumes))
+			for i := range m.Volumes {
+				names = append(names, m.Volumes[i].Name)
+			}
+			argv = append(argv, "--volumes", strings.Join(names, ","))
+		}
+		if wantI {
+			names := make([]string, 0, len(m.Images))
+			for i := range m.Images {
+				if len(m.Images[i].Refs) > 0 {
+					names = append(names, m.Images[i].Refs[0])
+				} else {
+					names = append(names, m.Images[i].Digest)
+				}
+			}
+			argv = append(argv, "--images", strings.Join(names, ","))
+		}
+		if wantN {
+			names := make([]string, 0, len(m.Networks))
+			for i := range m.Networks {
+				names = append(names, m.Networks[i].Name)
+			}
+			argv = append(argv, "--networks", strings.Join(names, ","))
+		}
 	}
-	if wantN {
-		names := make([]string, 0, len(m.Networks))
-		for i := range m.Networks {
-			names = append(names, m.Networks[i].Name)
+	if wantC && (allSelected || (!wantV && !wantI && !wantN)) {
+		fmt.Println("container strategy:")
+		fmt.Println("  restore  restore containers and dependencies to the snapshot")
+		fmt.Println("  current  recreate containers using current same-name dependencies")
+		fmt.Println("  missing  create only containers that are currently missing")
+		strategy := strings.ToLower(promptLine(r, "strategy (restore/current/missing)", "restore"))
+		flag, ok := rollbackStrategyFlag(strategy)
+		if !ok {
+			fmt.Printf("unknown rollback strategy %q\n", strategy)
+			return nil
 		}
-		argv = append(argv, "--networks", strings.Join(names, ","))
+		if flag != "" {
+			argv = append(argv, flag)
+		}
+	} else if wantC {
+		fmt.Println("container update strategies require a container-only or --all selection; using snapshot restore.")
 	}
 	return argv
 }
